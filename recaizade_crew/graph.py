@@ -14,6 +14,12 @@ tools = [read_file, write_file, list_directory, delete_file]
 # Let's bind tools to the executor model.
 crew_model_with_tools = crew_model.bind_tools(tools)
 
+def normalize_content(content):
+    """Normalize message content to string if it is a list (multimodal response)."""
+    if isinstance(content, list):
+        return "".join([str(item.get("text", "")) for item in content if item.get("type") == "text"])
+    return str(content)
+
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
     next_node: str
@@ -28,6 +34,7 @@ def recaizade_node(state: AgentState):
     # Add system prompt if not present at the start of valid interaction (simplified here)
     # We just send the conversation to Recaizade
     response = recaizade_model.invoke([HumanMessage(content=RECAIZADE_SYSTEM_PROMPT)] + messages)
+    response.content = normalize_content(response.content)
     return {"messages": [response], "sender": "Recaizade"}
 
 def router(state: AgentState):
@@ -50,6 +57,7 @@ def coder_node(state: AgentState):
     # We prompt Coder
     prompt = f"{CODER_SYSTEM_PROMPT}\nTask: {task}\nCurrent conversation history provided."
     response = crew_model.invoke([HumanMessage(content=prompt)] + messages)
+    response.content = normalize_content(response.content)
     return {"messages": [response], "sender": "Coder"}
 
 def executor_node(state: AgentState):
@@ -90,6 +98,7 @@ def reviewer_node(state: AgentState):
     last_msg = messages[-1]
     prompt = f"{REVIEWER_SYSTEM_PROMPT}\nReview the actions taken: {last_msg.content}"
     response = crew_model.invoke([HumanMessage(content=prompt)])
+    response.content = normalize_content(response.content)
     
     status = "APPROVED" if "APPROVED" in response.content else "REJECTED"
     return {"messages": [response], "sender": "Reviewer", "review_status": status}
