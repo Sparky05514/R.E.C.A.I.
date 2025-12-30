@@ -11,7 +11,8 @@ from tools import read_file, write_file, list_directory, delete_file
 tools = [read_file, write_file, list_directory, delete_file]
 # For Gemini, we might need to bind tools if we want function calling.
 # For this simplified version, let's use prompt engineering + manual parsing or simple function calling if generic enough.
-# Let's bind tools to the executor model.
+# Let's bind tools to models.
+recaizade_model_with_tools = recaizade_model.bind_tools(tools)
 crew_model_with_tools = crew_model.bind_tools(tools)
 
 def normalize_content(content):
@@ -31,10 +32,39 @@ class AgentState(TypedDict):
 
 def recaizade_node(state: AgentState):
     messages = state['messages']
-    # Add system prompt if not present at the start of valid interaction (simplified here)
-    # We just send the conversation to Recaizade
-    response = recaizade_model.invoke([HumanMessage(content=RECAIZADE_SYSTEM_PROMPT)] + messages)
-    response.content = normalize_content(response.content)
+    # Filter messages for a cleaner context if needed, but here we pass all.
+    # We use the model with tools.
+    response = recaizade_model_with_tools.invoke([HumanMessage(content=RECAIZADE_SYSTEM_PROMPT)] + messages)
+    
+    # Handle Tool Calls
+    if response.tool_calls:
+        # For simplicity in this graph structure, we execute them immediately and return the result as a message.
+        # In a more robust graph, we'd have a 'tools' node.
+        tool_results = []
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            
+            # Simple manual routing of tool calls
+            if tool_name == "read_file":
+                result = read_file(**tool_args)
+            elif tool_name == "write_file":
+                result = write_file(**tool_args)
+            elif tool_name == "list_directory":
+                result = list_directory(**tool_args)
+            elif tool_name == "delete_file":
+                result = delete_file(**tool_args)
+            else:
+                result = f"Error: Tool {tool_name} not found."
+            
+            tool_results.append(f"Tool '{tool_name}' result: {result}")
+        
+        # We append a summary of tool actions to the AI content or as a separate message
+        combined_content = normalize_content(response.content) + "\n\n" + "\n".join(tool_results)
+        response.content = combined_content
+    else:
+        response.content = normalize_content(response.content)
+        
     return {"messages": [response], "sender": "Recaizade"}
 
 def router(state: AgentState):

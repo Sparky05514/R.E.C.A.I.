@@ -34,6 +34,15 @@ async def test_task():
         if step_count > 10:
             break
 
+async def test_recaizade_tools():
+    print("\n--- Testing Recaizade Tool Usage ---")
+    inputs = {"messages": [HumanMessage(content="Please list the current directory for me.")]}
+    async for output in app_graph.astream(inputs):
+        for key, value in output.items():
+            print(f"Node '{key}':")
+            if "messages" in value:
+                print(f"Response: {value['messages'][0].content}")
+
 if __name__ == "__main__":
     if not os.environ.get("GOOGLE_API_KEY"):
         print("WARNING: GOOGLE_API_KEY not found in env. Tests might fail.")
@@ -41,3 +50,4 @@ if __name__ == "__main__":
     # Run async tests
     asyncio.run(test_chat())
     # asyncio.run(test_task()) # verifying task might write files, be careful.
+    asyncio.run(test_recaizade_tools())

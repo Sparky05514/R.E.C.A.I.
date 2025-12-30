@@ -1,8 +1,9 @@
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Input, Log, Static
+from textual.widgets import Header, Footer, Input, RichLog, Static
 from textual.containers import Container, Vertical, Horizontal
 from textual import work
 from rich.text import Text
+from rich.markup import escape
 from langchain_core.messages import HumanMessage, AIMessage
 
 from graph import app_graph
@@ -49,10 +50,10 @@ class RecaizadeApp(App):
 
     def compose(self) -> ComposeResult:
         with Container(id="chat-container"):
-            yield Log(id="chat-log")
+            yield RichLog(id="chat-log", highlight=True, markup=True)
         
         with Container(id="log-container"):
-            yield Log(id="debug-log")
+            yield RichLog(id="debug-log", highlight=True, markup=True)
 
         yield Input(placeholder="Talk to Recaizade...", id="input-box")
         yield Header()
@@ -60,13 +61,13 @@ class RecaizadeApp(App):
 
     def on_mount(self):
         self.title = "Recaizade Crew"
-        self.chat_log = self.query_one("#chat-log", Log)
-        self.debug_log = self.query_one("#debug-log", Log)
+        self.chat_log = self.query_one("#chat-log", RichLog)
+        self.debug_log = self.query_one("#debug-log", RichLog)
         
         # Initialize graph state if needed, or just keep history in memory locally
         self.conversation_history = []
         
-        self.chat_log.write("[bold green]System: Welcome to Recaizade Crew![/]")
+        self.chat_log.write(Text.from_markup("[bold green]System: Welcome to Recaizade Crew![/]"))
 
     async def on_input_submitted(self, message: Input.Submitted):
         user_input = message.value
@@ -75,7 +76,7 @@ class RecaizadeApp(App):
         if not user_input.strip():
             return
 
-        self.chat_log.write(f"[bold green]User:[/] {user_input}")
+        self.chat_log.write(Text.from_markup(f"[bold green]User:[/] {escape(user_input)}"))
         
         # Add to history
         self.conversation_history.append(HumanMessage(content=user_input))
@@ -100,7 +101,7 @@ class RecaizadeApp(App):
         async for event in app_graph.astream(initial_state):
             for key, value in event.items():
                 # Value is the partial state update
-                self.update_ui(self.debug_log.write, f"Step: {key}")
+                self.update_ui(self.debug_log.write, Text.from_markup(f"[bold yellow]Step:[/] {key}"))
                 if "messages" in value:
                     new_messages = value["messages"]
                     # If this is a list of new messages, we display them.
@@ -119,7 +120,7 @@ class RecaizadeApp(App):
                             sender = "Reviewer"
                         
                         # Update main chat window
-                        self.update_ui(self.chat_log.write, f"[bold cyan]{sender}:[/] {content}")
+                        self.update_ui(self.chat_log.write, Text.from_markup(f"[bold cyan]{sender}:[/] {escape(content)}"))
                         
                         # Upadte history to keep sync (though graph keeps its own usually, 
                         # but we passed 'messages' as input. 
