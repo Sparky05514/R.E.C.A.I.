@@ -134,7 +134,9 @@ class RecaizadeApp(App):
                             
     def update_ui(self, func, *args):
         # Textual helper to update UI from worker
-        self.call_from_thread(func, *args)
+        # Since run_graph is an async worker on the main thread (default), we don't need call_from_thread
+        # warning: if we move to thread=True, we might need call_from_thread again.
+        func(*args)
 
 if __name__ == "__main__":
     app = RecaizadeApp()
