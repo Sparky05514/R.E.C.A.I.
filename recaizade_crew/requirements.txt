@@ -1,0 +1,5 @@
+langgraph
+langchain-google-genai
+textual
+rich
+python-dotenv
