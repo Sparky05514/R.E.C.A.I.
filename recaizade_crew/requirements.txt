@@ -1,5 +1,6 @@
 langgraph
 langchain-google-genai
+langchain-ollama
 textual
 rich
 python-dotenv

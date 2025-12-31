@@ -118,9 +118,25 @@ class RecaizadeApp(App):
                             sender = "Executor"
                         elif key == "reviewer":
                             sender = "Reviewer"
+                        elif key == "documenter":
+                            sender = "Documenter"
                         
                         # Update main chat window
-                        self.update_ui(self.chat_log.write, Text.from_markup(f"[bold cyan]{sender}:[/] {escape(content)}"))
+                        # Check for <thinking> blocks
+                        import re
+                        parts = re.split(r"(<thinking>.*?</thinking>)", content, flags=re.DOTALL)
+                        
+                        for part in parts:
+                            if not part.strip(): continue
+                            
+                            if part.strip().startswith("<thinking>"):
+                                # Style thinking block
+                                clean_thinking = part.replace("<thinking>", "").replace("</thinking>", "").strip()
+                                self.update_ui(self.chat_log.write, Text.from_markup(f"[dim italic]{escape(clean_thinking)}[/]"))
+                            elif "[SYSTEM ALERT]" in part:
+                                self.update_ui(self.chat_log.write, Text.from_markup(f"[bold white on red]{escape(part)}[/]"))
+                            else:
+                                self.update_ui(self.chat_log.write, Text.from_markup(f"[bold cyan]{sender}:[/] {escape(part)}"))
                         
                         # Upadte history to keep sync (though graph keeps its own usually, 
                         # but we passed 'messages' as input. 

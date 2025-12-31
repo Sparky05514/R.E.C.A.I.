@@ -1,22 +1,37 @@
 from typing import TypedDict, Annotated, List, Union
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.agents import AgentAction, AgentFinish
 import operator
 
-from agents import recaizade_model, crew_model, RECAIZADE_SYSTEM_PROMPT, CODER_SYSTEM_PROMPT, EXECUTOR_SYSTEM_PROMPT, REVIEWER_SYSTEM_PROMPT
+from agents import model_manager, RECAIZADE_SYSTEM_PROMPT, CODER_SYSTEM_PROMPT, EXECUTOR_SYSTEM_PROMPT, REVIEWER_SYSTEM_PROMPT, DOCUMENTER_SYSTEM_PROMPT
 from tools import read_file, write_file, list_directory, delete_file
 
 # Define tools list for the agents to know about (even if we manually invoke them or bind them)
 tools = [read_file, write_file, list_directory, delete_file]
-# For Gemini, we might need to bind tools if we want function calling.
-# For this simplified version, let's use prompt engineering + manual parsing or simple function calling if generic enough.
-# Let's bind tools to models.
-recaizade_model_with_tools = recaizade_model.bind_tools(tools)
-crew_model_with_tools = crew_model.bind_tools(tools)
+
+def invoke_model_with_fallback(role, input_data, bind_tools_list=None):
+    """Invokes model with automatic fallback to Ollama on failure. Returns (response, alert_message)."""
+    try:
+        model = model_manager.get_model(role)
+        if bind_tools_list:
+            model = model.bind_tools(bind_tools_list)
+        return model.invoke(input_data), None
+    except Exception as e:
+        alert_msg = f"[SYSTEM ALERT] API Error: {e}. Switching to Ollama..."
+        print(alert_msg) # Keep print for fallback logging
+        model_manager.switch_to_ollama()
+        
+        # Retry with new provider
+        model = model_manager.get_model(role)
+        if bind_tools_list:
+            model = model.bind_tools(bind_tools_list)
+        return model.invoke(input_data), alert_msg
 
 def normalize_content(content):
     """Normalize message content to string if it is a list (multimodal response)."""
+    if content is None:
+        return ""
     if isinstance(content, list):
         return "".join([str(item.get("text", "")) for item in content if item.get("type") == "text"])
     return str(content)
@@ -31,19 +46,35 @@ class AgentState(TypedDict):
 # Nodes
 
 def recaizade_node(state: AgentState):
-    messages = state['messages']
-    # Filter messages for a cleaner context if needed, but here we pass all.
-    # We use the model with tools.
-    response = recaizade_model_with_tools.invoke([HumanMessage(content=RECAIZADE_SYSTEM_PROMPT)] + messages)
+    messages = list(state['messages']) # Make a copy to mutate locally
     
-    # Handle Tool Calls
-    if response.tool_calls:
-        # For simplicity in this graph structure, we execute them immediately and return the result as a message.
-        # In a more robust graph, we'd have a 'tools' node.
-        tool_results = []
+    # ReAct Loop
+    MAX_ITERATIONS = 3
+    iterations = 0
+    final_alert = None
+    
+    while iterations < MAX_ITERATIONS:
+        # Invoke model
+        # For the first iteration, messages are just the state messages.
+        # For subsequent iterations, messages include the previous AIMessage (with tool calls) and ToolMessages.
+        response, alert = invoke_model_with_fallback("recaizade", [HumanMessage(content=RECAIZADE_SYSTEM_PROMPT)] + messages, bind_tools_list=tools)
+        if alert:
+            final_alert = alert # Keep the latest alert if any
+            
+        # Append response to local history
+        messages.append(response)
+        
+        # Check for tool calls
+        if not response.tool_calls:
+            # No tool calls, we have a final response
+            break
+            
+        # Execute Tools
+        tool_outputs = []
         for tool_call in response.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
+            tool_id = tool_call["id"]
             
             # Simple manual routing of tool calls
             if tool_name == "read_file":
@@ -57,15 +88,37 @@ def recaizade_node(state: AgentState):
             else:
                 result = f"Error: Tool {tool_name} not found."
             
-            tool_results.append(f"Tool '{tool_name}' result: {result}")
+            # Create ToolMessage
+            tool_outputs.append(ToolMessage(
+                content=str(result),
+                tool_call_id=tool_id,
+                name=tool_name
+            ))
+            
+        # Append tool outputs to local history
+        messages.extend(tool_outputs)
+        iterations += 1
+    
+    # Final response processing
+    # If we exited the loop because of MAX_ITERATIONS and still have tool calls, we might want to warn.
+    # But usually the last response will be the text response if break occurred.
+    
+    # We want to return just the NEW messages generated during this node's execution (including tool calls and results, and final response)
+    # The state['messages'] has the original history. 'messages' has everything.
+    # Diff them? Or simplier: the 'messages' agent state annotation uses operator.add.
+    # So we just return the new messages appended.
+    
+    new_messages = messages[len(state['messages']):]
+    
+    # We also need to normalize content for the final AI message if needed, 
+    # but the loop handles the structure.
+    # The only thing is normalizing for the 'sender' check or logging if we want.
+    # For now, we trust the model's final response is text.
+    
+    if final_alert:
+        new_messages.insert(0, AIMessage(content=final_alert))
         
-        # We append a summary of tool actions to the AI content or as a separate message
-        combined_content = normalize_content(response.content) + "\n\n" + "\n".join(tool_results)
-        response.content = combined_content
-    else:
-        response.content = normalize_content(response.content)
-        
-    return {"messages": [response], "sender": "Recaizade"}
+    return {"messages": new_messages, "sender": "Recaizade"}
 
 def router(state: AgentState):
     # Check the last message. If it starts with /task, route to crew.
@@ -106,6 +159,12 @@ def coder_node(state: AgentState):
     # Format conversation history with sender attribution
     conversation_context = format_messages_with_senders(messages)
     
+    # Read Bot Memory if it exists
+    memory_context = ""
+    memory_content = read_file("bot_memory/memory.md")
+    if not memory_content.startswith("Error"):
+        memory_context = f"\n=== BOT MEMORY (Recent History & Context) ===\n{memory_content}\n"
+    
     # Build a comprehensive prompt with crew awareness
     prompt = f"""{CODER_SYSTEM_PROMPT}
 
@@ -113,10 +172,11 @@ def coder_node(state: AgentState):
 You are part of a crew with:
 - Executor: Will implement your code by writing files
 - Reviewer: Will review the implementation and approve or request changes
+- Documenter: Reviews progress and maintains memory
 
 === CURRENT TASK ===
 {task}
-
+{memory_context}
 === CONVERSATION HISTORY ===
 {conversation_context}
 
@@ -125,14 +185,18 @@ Provide your code solution. Include "File: filename.py" before code blocks so Ex
 Start your response with "Coder:" to identify yourself.
 """
     
-    response = crew_model.invoke([HumanMessage(content=prompt)])
+    response, alert = invoke_model_with_fallback("coder", [HumanMessage(content=prompt)])
     content = normalize_content(response.content)
     
     # Ensure response is prefixed with sender identity
     if not content.startswith("Coder:"):
         content = f"Coder: {content}"
     
-    return {"messages": [AIMessage(content=content)], "sender": "Coder"}
+    out_messages = [AIMessage(content=content)]
+    if alert:
+        out_messages.insert(0, AIMessage(content=alert))
+        
+    return {"messages": out_messages, "sender": "Coder"}
 
 def executor_node(state: AgentState):
     """Executor takes the Coder's output and implements it by writing files."""
@@ -238,15 +302,91 @@ If changes are needed, provide specific feedback to the Coder about what to fix.
 Start your response with "Reviewer:" to identify yourself.
 """
     
-    response = crew_model.invoke([HumanMessage(content=prompt)])
+    response, alert = invoke_model_with_fallback("reviewer", [HumanMessage(content=prompt)])
     content = normalize_content(response.content)
     
     # Ensure response is prefixed with sender identity
     if not content.startswith("Reviewer:"):
         content = f"Reviewer: {content}"
     
+    
     status = "APPROVED" if "APPROVED" in content.upper() else "REJECTED"
-    return {"messages": [AIMessage(content=content)], "sender": "Reviewer", "review_status": status}
+    
+    out_messages = [AIMessage(content=content)]
+    if alert:
+        out_messages.insert(0, AIMessage(content=alert))
+        
+    return {"messages": out_messages, "sender": "Reviewer", "review_status": status}
+
+def documenter_node(state: AgentState):
+    """Documenter creates reports for user and memory for bots."""
+    messages = state['messages']
+    task = state.get('task_description', '')
+    review_status = state.get('review_status', 'UNKNOWN')
+    
+    # Format context
+    conversation_context = format_messages_with_senders(messages)
+    
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    prompt = f"""{DOCUMENTER_SYSTEM_PROMPT}
+
+=== CURRENT TASK ===
+{task}
+
+=== REVIEW STATUS ===
+{review_status}
+
+=== FULL CONVERSATION ===
+{conversation_context}
+
+=== INSTRUCTIONS ===
+1. Analyze the conversation and actions taken.
+2. Generate a User Report (User Report: ...)
+3. Generate a Bot Memory (Bot Memory: ...)
+
+Start your response with "Documenter:".
+"""
+    response, alert = invoke_model_with_fallback("documenter", [HumanMessage(content=prompt)])
+    content = normalize_content(response.content)
+    if not content.startswith("Documenter:"):
+        content = f"Documenter: {content}"
+        
+    # Extract and write files
+    # We look for sections or just dump the whole thing?
+    # Better to parse if possible, or just append to log.
+    
+    # Simple parsing strategy:
+    user_report = ""
+    bot_memory = ""
+    
+    import re
+    user_match = re.search(r"User Report:(.*?)(?=Bot Memory:|$)", content, re.DOTALL | re.IGNORECASE)
+    if user_match:
+        user_report = user_match.group(1).strip()
+        
+    memory_match = re.search(r"Bot Memory:(.*?)(?=$)", content, re.DOTALL | re.IGNORECASE)
+    if memory_match:
+        bot_memory = memory_match.group(1).strip()
+        
+    if user_report:
+        write_file(f"user_reports/report_{timestamp}.md", f"# Progress Report - {timestamp}\n\n{user_report}")
+        
+    if bot_memory:
+        # Append to memory file or overwrite? User said: "bots will read the latest things and remember"
+        # Overwrite seems better for "state", appending for "log". 
+        # "remember about the important things" -> implies cumulative state or latest summary.
+        # Let's overwrite 'memory.md' with the latest comprehensive memory state.
+        write_file("bot_memory/memory.md", bot_memory)
+        # Also keep a history?
+        write_file(f"bot_memory/memory_{timestamp}.md", bot_memory)
+        
+    out_messages = [AIMessage(content=content)]
+    if alert:
+        out_messages.insert(0, AIMessage(content=alert))
+        
+    return {"messages": out_messages, "sender": "Documenter"}
 
 # Building the Graph
 workflow = StateGraph(AgentState)
@@ -255,6 +395,7 @@ workflow.add_node("recaizade", recaizade_node)
 workflow.add_node("coder", coder_node)
 workflow.add_node("executor", executor_node)
 workflow.add_node("reviewer", reviewer_node)
+workflow.add_node("documenter", documenter_node)
 
 # We need a custom entrypoint logic or just start at recaizade usually.
 # But for /task, we might intercept before Recaizade?
@@ -282,16 +423,18 @@ workflow.add_edge("recaizade", END)
 # Crew Loop
 workflow.add_edge("coder", "executor")
 workflow.add_edge("executor", "reviewer")
+workflow.add_edge("reviewer", "documenter") # Reviewer -> Documenter
 
-def route_review(state: AgentState):
+def route_documenter(state: AgentState):
+    # After documentation, check if we are done based on reviewer status
     if state.get("review_status") == "APPROVED":
         return "end"
     else:
         return "coder" # Loop back to fix
 
 workflow.add_conditional_edges(
-    "reviewer",
-    route_review,
+    "documenter",
+    route_documenter,
     {
         "end": END,
         "coder": "coder"
