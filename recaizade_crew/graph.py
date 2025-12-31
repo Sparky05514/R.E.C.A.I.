@@ -80,58 +80,173 @@ def router(state: AgentState):
          pass
     return {"next_node": "end"}
 
+def format_messages_with_senders(messages):
+    """Format messages with sender attribution for crew context."""
+    formatted = []
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            formatted.append(f"[User]: {normalize_content(msg.content)}")
+        elif isinstance(msg, AIMessage):
+            # Try to identify sender from content patterns or default to previous context
+            content = normalize_content(msg.content)
+            if content.startswith("Executor:"):
+                formatted.append(f"[Executor]: {content}")
+            elif content.startswith("Coder:"):
+                formatted.append(f"[Coder]: {content}")
+            elif content.startswith("Reviewer:"):
+                formatted.append(f"[Reviewer]: {content}")
+            else:
+                formatted.append(f"[Recaizade]: {content}")
+    return "\n\n".join(formatted)
+
 def coder_node(state: AgentState):
     task = state.get('task_description', '')
     messages = state['messages']
-    # Filter messages to just relevant context if needed, or keeping history is fine.
-    # We prompt Coder
-    prompt = f"{CODER_SYSTEM_PROMPT}\nTask: {task}\nCurrent conversation history provided."
-    response = crew_model.invoke([HumanMessage(content=prompt)] + messages)
-    response.content = normalize_content(response.content)
-    return {"messages": [response], "sender": "Coder"}
+    
+    # Format conversation history with sender attribution
+    conversation_context = format_messages_with_senders(messages)
+    
+    # Build a comprehensive prompt with crew awareness
+    prompt = f"""{CODER_SYSTEM_PROMPT}
+
+=== CREW CONTEXT ===
+You are part of a crew with:
+- Executor: Will implement your code by writing files
+- Reviewer: Will review the implementation and approve or request changes
+
+=== CURRENT TASK ===
+{task}
+
+=== CONVERSATION HISTORY ===
+{conversation_context}
+
+=== YOUR RESPONSE ===
+Provide your code solution. Include "File: filename.py" before code blocks so Executor knows where to write.
+Start your response with "Coder:" to identify yourself.
+"""
+    
+    response = crew_model.invoke([HumanMessage(content=prompt)])
+    content = normalize_content(response.content)
+    
+    # Ensure response is prefixed with sender identity
+    if not content.startswith("Coder:"):
+        content = f"Coder: {content}"
+    
+    return {"messages": [AIMessage(content=content)], "sender": "Coder"}
 
 def executor_node(state: AgentState):
-    # Executor should look at the last message from Coder and execute tools?
-    # Or simplified: Coder just writes code blocks, Executor applies them?
-    # Better: Coder uses 'write_file' tool calls directly?
-    # Let's try to let the crew_model_with_tools handle it.
-    
-    last_msg = state['messages'][-1]
-    # In a real agent loop, we'd process tool calls.
-    # For this graph, let's assume Coder outputs text, Executor interprets and acts.
-    # Or we make Coder capable of tool calls.
-    
-    # Let's use the 'crew_model_with_tools' for the Coder actually, so Coder can write files directly.
-    # But the requirement split them.
-    # Let's say Executor takes the code from Coder and writes it.
-    
-    code_content = last_msg.content
-    # Simple heuristic: extract code block
+    """Executor takes the Coder's output and implements it by writing files."""
     import re
-    code_match = re.search(r"```python(.*?)```", code_content, re.DOTALL)
-    if code_match:
-        code = code_match.group(1).strip()
-        # We need a filename.
-        # Let's ask the Coder to specify filename in a structured way or just regex it.
-        # "File: filename.py"
-        file_match = re.search(r"File:\s*([\w\./]+)", code_content)
-        if file_match:
-            filename = file_match.group(1).strip()
-            result = write_file(filename, code)
-            return {"messages": [AIMessage(content=f"Executor: Wrote file {filename}. Result: {result}")], "sender": "Executor"}
     
-    # If no code block, maybe just a message
-    return {"messages": [AIMessage(content="Executor: No code block or filename found to execute.")], "sender": "Executor"}
-
-def reviewer_node(state: AgentState):
     messages = state['messages']
     last_msg = messages[-1]
-    prompt = f"{REVIEWER_SYSTEM_PROMPT}\nReview the actions taken: {last_msg.content}"
-    response = crew_model.invoke([HumanMessage(content=prompt)])
-    response.content = normalize_content(response.content)
     
-    status = "APPROVED" if "APPROVED" in response.content else "REJECTED"
-    return {"messages": [response], "sender": "Reviewer", "review_status": status}
+    # Get conversation context for better understanding
+    conversation_context = format_messages_with_senders(messages)
+    
+    code_content = normalize_content(last_msg.content)
+    
+    executed_files = []
+    
+    # Robust parsing: Split content by code blocks to find preceding filenames
+    # This handles interleaved text and code correctly
+    parts = re.split(r"(```(?:\w+)?\n.*?```)", code_content, flags=re.DOTALL)
+    
+    found_code = False
+    
+    # Parts will be [text, code_block, text, code_block...]
+    # We iterate over code blocks (indices 1, 3, 5...)
+    for i in range(1, len(parts), 2):
+        code_block_raw = parts[i]
+        preceding_text = parts[i-1]
+        found_code = True
+        
+        # Extract code content (strip backticks)
+        # Find first newline
+        first_newline = code_block_raw.find('\n')
+        if first_newline == -1: continue
+        
+        # End is usually the last 3 chars ``` (or more backticks)
+        # We can just look for the last ```
+        last_backticks = code_block_raw.rfind('```')
+        if last_backticks <= first_newline: continue
+        
+        code = code_block_raw[first_newline+1 : last_backticks]
+        
+        # Find filename in preceding text (look for last occurrence)
+        file_matches = list(re.finditer(r"(?:File|Filename):\s*[`'\"]?([\w\./_\-]+)[`'\"]?", preceding_text, re.IGNORECASE))
+        
+        if file_matches:
+            filename = file_matches[-1].group(1).strip()
+            result = write_file(filename, code)
+            executed_files.append(f"  - {filename}: {result}")
+        else:
+             # Try to find it in the first line of the code block if it was a comment?
+             # Or just report missing filename
+             executed_files.append(f"  - [Skipped]: Found code block but no 'File: filename.py' specified before it.")
+
+    if executed_files:
+        files_summary = "\n".join(executed_files)
+        response_content = f"""Executor: I have implemented the Coder's solution.
+
+Files processed:
+{files_summary}
+
+Reviewer, please review these changes and verify they meet the requirements from the original task."""
+    else:
+        # No code found - communicate this to the crew
+        if found_code:
+             response_content = f"""Executor: I found code blocks but couldn't associate them with filenames.
+Please ensure you write "File: filename.py" immediately before each code block."""
+        else:
+            response_content = f"""Executor: I could not find properly formatted code blocks to execute.
+
+Coder, please ensure your response includes:
+1. "File: filename.py" before each code block
+2. Code wrapped in ```python ... ``` blocks
+
+I'll wait for updated instructions."""
+    
+    return {"messages": [AIMessage(content=response_content)], "sender": "Executor"}
+
+def reviewer_node(state: AgentState):
+    """Reviewer evaluates the work done by Coder and Executor."""
+    messages = state['messages']
+    task = state.get('task_description', 'No task description available')
+    
+    # Format full conversation for context
+    conversation_context = format_messages_with_senders(messages)
+    
+    prompt = f"""{REVIEWER_SYSTEM_PROMPT}
+
+=== CREW CONTEXT ===
+You are part of a crew with:
+- Coder: Wrote the code solution
+- Executor: Implemented the code by writing files
+You are reviewing their work.
+
+=== ORIGINAL TASK ===
+{task}
+
+=== FULL CONVERSATION ===
+{conversation_context}
+
+=== YOUR REVIEW ===
+Review the implementation against the original task requirements.
+If the work meets requirements, respond with "APPROVED" and explain why.
+If changes are needed, provide specific feedback to the Coder about what to fix.
+Start your response with "Reviewer:" to identify yourself.
+"""
+    
+    response = crew_model.invoke([HumanMessage(content=prompt)])
+    content = normalize_content(response.content)
+    
+    # Ensure response is prefixed with sender identity
+    if not content.startswith("Reviewer:"):
+        content = f"Reviewer: {content}"
+    
+    status = "APPROVED" if "APPROVED" in content.upper() else "REJECTED"
+    return {"messages": [AIMessage(content=content)], "sender": "Reviewer", "review_status": status}
 
 # Building the Graph
 workflow = StateGraph(AgentState)

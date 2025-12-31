@@ -25,7 +25,9 @@ def write_file(filepath: str, content: str) -> str:
         return f"Error: Access denied to path {filepath}"
     try:
         # Create directories if they don't exist
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        dirname = os.path.dirname(filepath)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
         with open(filepath, 'w') as f:
             f.write(content)
         return f"Successfully wrote to {filepath}"
