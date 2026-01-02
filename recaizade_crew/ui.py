@@ -16,17 +16,19 @@ class ChatMessage(Static):
 
     def compose(self) -> ComposeResult:
         # Style based on sender
-        color = "green" if self.sender == "User" else "blue"
+        color = "#7aa2f7" if self.sender == "User" else "#bb9af7"
         if self.sender == "Recaizade":
-            color = "cyan"
+            color = "#7dcfff"
         elif self.sender in ["Coder", "Executor", "Reviewer"]:
-            color = "magenta"
+            color = "#bb9af7"
         
-        yield Static(f"[{color}]{self.sender}:[/{color}] {self.message}")
+        yield Static(f"[{color}][bold]{self.sender}:[/][/] {self.message}")
 
 class RecaizadeApp(App):
     CSS = """
     Screen {
+        background: #1a1b26;
+        color: #c0caf5;
         layout: grid;
         grid-size: 2;
         grid-columns: 3fr 1fr;
@@ -34,17 +36,38 @@ class RecaizadeApp(App):
     
     #chat-container {
         height: 100%;
-        border: solid green;
+        border: round #414868;
     }
     
     #log-container {
         height: 100%;
-        border: solid yellow;
+        border: round #414868;
     }
     
     #input-box {
         dock: bottom;
         margin: 1;
+        border: round #414868;
+        background: #24283b;
+        color: #c0caf5;
+    }
+
+    #input-box:focus {
+        border: tall #7aa2f7;
+    }
+
+    RichLog {
+        background: #1a1b26;
+        color: #c0caf5;
+    }
+
+    Header {
+        background: #1a1b26;
+        color: #7aa2f7;
+    }
+
+    Footer {
+        background: #1a1b26;
     }
     """
 
@@ -109,7 +132,7 @@ class RecaizadeApp(App):
                     for msg in new_messages:
                         if isinstance(msg, ToolMessage):
                             # Render tool execution
-                            self.update_ui(self.chat_log.write, Text.from_markup(f"[bold blue]Tool ({escape(msg.name)}):[/] [dim]{escape(str(msg.content))[:200]}...[/]"))
+                            self.update_ui(self.chat_log.write, Text.from_markup(f"[bold #e0af68]Tool ({escape(msg.name)}):[/] [dim]{escape(str(msg.content))[:200]}...[/]"))
                         else:
                             sender = "Unknown"
                             
@@ -148,7 +171,8 @@ class RecaizadeApp(App):
                                 elif "[SYSTEM ALERT]" in part:
                                     self.update_ui(self.chat_log.write, Text.from_markup(f"[bold white on red]{escape(part)}[/]"))
                                 else:
-                                    self.update_ui(self.chat_log.write, Text.from_markup(f"[bold cyan]{sender}:[/] {escape(part)}"))
+                                    sender_color = "#7dcfff" if sender == "Recaizade" else "#bb9af7"
+                                    self.update_ui(self.chat_log.write, Text.from_markup(f"[bold {sender_color}]{sender}:[/] {escape(part)}"))
                         
                         # Upadte history to keep sync (though graph keeps its own usually, 
                         # but we passed 'messages' as input. 
