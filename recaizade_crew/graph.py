@@ -18,15 +18,23 @@ def invoke_model_with_fallback(role, input_data, bind_tools_list=None):
             model = model.bind_tools(bind_tools_list)
         return model.invoke(input_data), None
     except Exception as e:
-        alert_msg = f"[SYSTEM ALERT] API Error: {e}. Switching to Ollama..."
-        print(alert_msg) # Keep print for fallback logging
+        error_str = str(e)
+        # If we are already on Ollama and it fails, return error message
+        if model_manager.provider == "ollama":
+            return AIMessage(content=f"[SYSTEM ALERT] Critical Error: Local model (Ollama) failed or is unreachable: {error_str}"), None
+            
+        # If we are on Gemini, attempt fallback
+        alert_msg = f"[SYSTEM ALERT] API Error: {error_str}. Switching to Ollama..."
+        print(alert_msg) 
         model_manager.switch_to_ollama()
         
-        # Retry with new provider
-        model = model_manager.get_model(role)
-        if bind_tools_list:
-            model = model.bind_tools(bind_tools_list)
-        return model.invoke(input_data), alert_msg
+        try:
+            model = model_manager.get_model(role)
+            if bind_tools_list:
+                model = model.bind_tools(bind_tools_list)
+            return model.invoke(input_data), alert_msg
+        except Exception as e2:
+            return AIMessage(content=f"[SYSTEM ALERT] Critical Error: Fallback to Ollama failed: {e2}"), alert_msg
 
 def normalize_content(content):
     """Normalize message content to string if it is a list (multimodal response)."""
@@ -154,49 +162,71 @@ def format_messages_with_senders(messages):
 
 def coder_node(state: AgentState):
     task = state.get('task_description', '')
-    messages = state['messages']
+    messages = list(state['messages']) # Copy
     
-    # Format conversation history with sender attribution
+    # Format conversation history for context
     conversation_context = format_messages_with_senders(messages)
     
-    # Read Bot Memory if it exists
+    # Read Bot Memory
     memory_context = ""
     memory_content = read_file("bot_memory/memory.md")
     if not memory_content.startswith("Error"):
-        memory_context = f"\n=== BOT MEMORY (Recent History & Context) ===\n{memory_content}\n"
+        memory_context = f"\n=== BOT MEMORY ===\n{memory_content}\n"
     
-    # Build a comprehensive prompt with crew awareness
-    prompt = f"""{CODER_SYSTEM_PROMPT}
+    system_prompt = f"""{CODER_SYSTEM_PROMPT}
 
 === CREW CONTEXT ===
-You are part of a crew with:
-- Executor: Will implement your code by writing files
-- Reviewer: Will review the implementation and approve or request changes
-- Documenter: Reviews progress and maintains memory
+- Executor: Implements code
+- Reviewer: Approves changes
+- Documenter: Reports progress
 
 === CURRENT TASK ===
 {task}
 {memory_context}
 === CONVERSATION HISTORY ===
 {conversation_context}
-
-=== YOUR RESPONSE ===
-Provide your code solution. Include "File: filename.py" before code blocks so Executor knows where to write.
-Start your response with "Coder:" to identify yourself.
 """
     
-    response, alert = invoke_model_with_fallback("coder", [HumanMessage(content=prompt)])
-    content = normalize_content(response.content)
+    # ReAct Loop
+    MAX_ITERATIONS = 3
+    iterations = 0
+    final_alert = None
+    node_messages = []
+    loop_messages = [HumanMessage(content=system_prompt)]
     
-    # Ensure response is prefixed with sender identity
-    if not content.startswith("Coder:"):
-        content = f"Coder: {content}"
-    
-    out_messages = [AIMessage(content=content)]
-    if alert:
-        out_messages.insert(0, AIMessage(content=alert))
+    while iterations < MAX_ITERATIONS:
+        response, alert = invoke_model_with_fallback("coder", loop_messages, bind_tools_list=tools)
+        if alert: final_alert = alert
         
-    return {"messages": out_messages, "sender": "Coder"}
+        content = normalize_content(response.content)
+        if content and not content.startswith("Coder:"):
+            response.content = f"Coder: {content}"
+        
+        node_messages.append(response)
+        loop_messages.append(response)
+        
+        if not response.tool_calls:
+            break
+            
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            tool_id = tool_call["id"]
+            
+            if tool_name == "read_file": result = read_file(**tool_args)
+            elif tool_name == "write_file": result = write_file(**tool_args)
+            elif tool_name == "list_directory": result = list_directory(**tool_args)
+            elif tool_name == "delete_file": result = delete_file(**tool_args)
+            else: result = f"Error: Tool {tool_name} not found."
+            
+            tool_msg = ToolMessage(content=str(result), tool_call_id=tool_id, name=tool_name)
+            node_messages.append(tool_msg)
+            loop_messages.append(tool_msg)
+        iterations += 1
+        
+    if final_alert:
+        node_messages.insert(0, AIMessage(content=final_alert))
+    return {"messages": node_messages, "sender": "Coder"}
 
 def executor_node(state: AgentState):
     """Executor takes the Coder's output and implements it by writing files."""
@@ -275,118 +305,139 @@ I'll wait for updated instructions."""
 
 def reviewer_node(state: AgentState):
     """Reviewer evaluates the work done by Coder and Executor."""
-    messages = state['messages']
+    messages = list(state['messages'])
     task = state.get('task_description', 'No task description available')
-    
-    # Format full conversation for context
     conversation_context = format_messages_with_senders(messages)
     
     prompt = f"""{REVIEWER_SYSTEM_PROMPT}
-
 === CREW CONTEXT ===
-You are part of a crew with:
-- Coder: Wrote the code solution
-- Executor: Implemented the code by writing files
-You are reviewing their work.
-
+Reviewing work of Coder and Executor.
 === ORIGINAL TASK ===
 {task}
-
-=== FULL CONVERSATION ===
+=== CONVERSATION HISTORY ===
 {conversation_context}
-
-=== YOUR REVIEW ===
-Review the implementation against the original task requirements.
-If the work meets requirements, respond with "APPROVED" and explain why.
-If changes are needed, provide specific feedback to the Coder about what to fix.
-Start your response with "Reviewer:" to identify yourself.
 """
     
-    response, alert = invoke_model_with_fallback("reviewer", [HumanMessage(content=prompt)])
-    content = normalize_content(response.content)
+    MAX_ITERATIONS = 3
+    iterations = 0
+    final_alert = None
+    node_messages = []
+    loop_messages = [HumanMessage(content=prompt)]
     
-    # Ensure response is prefixed with sender identity
-    if not content.startswith("Reviewer:"):
-        content = f"Reviewer: {content}"
-    
-    
-    status = "APPROVED" if "APPROVED" in content.upper() else "REJECTED"
-    
-    out_messages = [AIMessage(content=content)]
-    if alert:
-        out_messages.insert(0, AIMessage(content=alert))
+    while iterations < MAX_ITERATIONS:
+        response, alert = invoke_model_with_fallback("reviewer", loop_messages, bind_tools_list=tools)
+        if alert: final_alert = alert
         
-    return {"messages": out_messages, "sender": "Reviewer", "review_status": status}
+        content = normalize_content(response.content)
+        if content and not content.startswith("Reviewer:"):
+            response.content = f"Reviewer: {content}"
+            
+        node_messages.append(response)
+        loop_messages.append(response)
+        
+        if not response.tool_calls:
+            break
+            
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            tool_id = tool_call["id"]
+            
+            if tool_name == "read_file": result = read_file(**tool_args)
+            elif tool_name == "write_file": result = write_file(**tool_args)
+            elif tool_name == "list_directory": result = list_directory(**tool_args)
+            elif tool_name == "delete_file": result = delete_file(**tool_args)
+            else: result = f"Error: Tool {tool_name} not found."
+            
+            tool_msg = ToolMessage(content=str(result), tool_call_id=tool_id, name=tool_name)
+            node_messages.append(tool_msg)
+            loop_messages.append(tool_msg)
+        iterations += 1
+        
+    last_content = normalize_content(node_messages[-1].content)
+    status = "APPROVED" if "REVIEW_PASSED" in last_content.upper() else "REJECTED"
+    
+    if final_alert:
+        node_messages.insert(0, AIMessage(content=final_alert))
+        
+    return {"messages": node_messages, "sender": "Reviewer", "review_status": status}
 
 def documenter_node(state: AgentState):
     """Documenter creates reports for user and memory for bots."""
-    messages = state['messages']
+    messages = list(state['messages'])
     task = state.get('task_description', '')
     review_status = state.get('review_status', 'UNKNOWN')
-    
-    # Format context
     conversation_context = format_messages_with_senders(messages)
+    
+    prompt = f"""{DOCUMENTER_SYSTEM_PROMPT}
+=== CURRENT TASK ===
+{task}
+=== REVIEW STATUS ===
+{review_status}
+=== CONVERSATION HISTORY ===
+{conversation_context}
+"""
+    
+    MAX_ITERATIONS = 3
+    iterations = 0
+    final_alert = None
+    node_messages = []
+    loop_messages = [HumanMessage(content=prompt)]
+    
+    while iterations < MAX_ITERATIONS:
+        response, alert = invoke_model_with_fallback("documenter", loop_messages, bind_tools_list=tools)
+        if alert: final_alert = alert
+        
+        content = normalize_content(response.content)
+        if content and not content.startswith("Documenter:"):
+            response.content = f"Documenter: {content}"
+            
+        node_messages.append(response)
+        loop_messages.append(response)
+        
+        if not response.tool_calls:
+            break
+            
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            tool_id = tool_call["id"]
+            
+            if tool_name == "read_file": result = read_file(**tool_args)
+            elif tool_name == "write_file": result = write_file(**tool_args)
+            elif tool_name == "list_directory": result = list_directory(**tool_args)
+            elif tool_name == "delete_file": result = delete_file(**tool_args)
+            else: result = f"Error: Tool {tool_name} not found."
+            
+            tool_msg = ToolMessage(content=str(result), tool_call_id=tool_id, name=tool_name)
+            node_messages.append(tool_msg)
+            loop_messages.append(tool_msg)
+        iterations += 1
+        
+    # Final response extraction and reporting
+    final_content = normalize_content(node_messages[-1].content)
     
     import datetime
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    prompt = f"""{DOCUMENTER_SYSTEM_PROMPT}
-
-=== CURRENT TASK ===
-{task}
-
-=== REVIEW STATUS ===
-{review_status}
-
-=== FULL CONVERSATION ===
-{conversation_context}
-
-=== INSTRUCTIONS ===
-1. Analyze the conversation and actions taken.
-2. Generate a User Report (User Report: ...)
-3. Generate a Bot Memory (Bot Memory: ...)
-
-Start your response with "Documenter:".
-"""
-    response, alert = invoke_model_with_fallback("documenter", [HumanMessage(content=prompt)])
-    content = normalize_content(response.content)
-    if not content.startswith("Documenter:"):
-        content = f"Documenter: {content}"
-        
-    # Extract and write files
-    # We look for sections or just dump the whole thing?
-    # Better to parse if possible, or just append to log.
-    
-    # Simple parsing strategy:
     user_report = ""
     bot_memory = ""
-    
     import re
-    user_match = re.search(r"User Report:(.*?)(?=Bot Memory:|$)", content, re.DOTALL | re.IGNORECASE)
-    if user_match:
-        user_report = user_match.group(1).strip()
-        
-    memory_match = re.search(r"Bot Memory:(.*?)(?=$)", content, re.DOTALL | re.IGNORECASE)
-    if memory_match:
-        bot_memory = memory_match.group(1).strip()
+    user_match = re.search(r"User Report:(.*?)(?=Bot Memory:|$)", final_content, re.DOTALL | re.IGNORECASE)
+    if user_match: user_report = user_match.group(1).strip()
+    memory_match = re.search(r"Bot Memory:(.*?)(?=$)", final_content, re.DOTALL | re.IGNORECASE)
+    if memory_match: bot_memory = memory_match.group(1).strip()
         
     if user_report:
         write_file(f"user_reports/report_{timestamp}.md", f"# Progress Report - {timestamp}\n\n{user_report}")
-        
     if bot_memory:
-        # Append to memory file or overwrite? User said: "bots will read the latest things and remember"
-        # Overwrite seems better for "state", appending for "log". 
-        # "remember about the important things" -> implies cumulative state or latest summary.
-        # Let's overwrite 'memory.md' with the latest comprehensive memory state.
         write_file("bot_memory/memory.md", bot_memory)
-        # Also keep a history?
         write_file(f"bot_memory/memory_{timestamp}.md", bot_memory)
         
-    out_messages = [AIMessage(content=content)]
-    if alert:
-        out_messages.insert(0, AIMessage(content=alert))
+    if final_alert:
+        node_messages.insert(0, AIMessage(content=final_alert))
         
-    return {"messages": out_messages, "sender": "Documenter"}
+    return {"messages": node_messages, "sender": "Documenter"}
 
 # Building the Graph
 workflow = StateGraph(AgentState)

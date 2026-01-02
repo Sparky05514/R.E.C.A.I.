@@ -108,7 +108,16 @@ class RecaizadeApp(App):
                     # Since we use operator.add, the output of the node is just the new messages usually.
                     for msg in new_messages:
                         sender = "Unknown"
+                        sender = "Unknown"
+                        
+                        # Normalize content (handle list format)
                         content = msg.content
+                        if isinstance(content, list):
+                            content = "".join([str(item.get("text", "")) for item in content if item.get("type") == "text"])
+                        elif content is None:
+                            content = ""
+                        else:
+                            content = str(content)
                         
                         if key == "recaizade":
                             sender = "Recaizade"
@@ -137,6 +146,9 @@ class RecaizadeApp(App):
                                 self.update_ui(self.chat_log.write, Text.from_markup(f"[bold white on red]{escape(part)}[/]"))
                             else:
                                 self.update_ui(self.chat_log.write, Text.from_markup(f"[bold cyan]{sender}:[/] {escape(part)}"))
+                        elif isinstance(msg, ToolMessage):
+                            # Render tool execution
+                            self.update_ui(self.chat_log.write, Text.from_markup(f"[bold blue]Tool ({msg.name}):[/] [dim]{escape(str(msg.content))[:200]}...[/]"))
                         
                         # Upadte history to keep sync (though graph keeps its own usually, 
                         # but we passed 'messages' as input. 
