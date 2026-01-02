@@ -4,7 +4,7 @@ from textual.containers import Container, Vertical, Horizontal
 from textual import work
 from rich.text import Text
 from rich.markup import escape
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from graph import app_graph
 
@@ -107,48 +107,48 @@ class RecaizadeApp(App):
                     # If this is a list of new messages, we display them.
                     # Since we use operator.add, the output of the node is just the new messages usually.
                     for msg in new_messages:
-                        sender = "Unknown"
-                        sender = "Unknown"
-                        
-                        # Normalize content (handle list format)
-                        content = msg.content
-                        if isinstance(content, list):
-                            content = "".join([str(item.get("text", "")) for item in content if item.get("type") == "text"])
-                        elif content is None:
-                            content = ""
-                        else:
-                            content = str(content)
-                        
-                        if key == "recaizade":
-                            sender = "Recaizade"
-                        elif key == "coder":
-                            sender = "Coder"
-                        elif key == "executor":
-                            sender = "Executor"
-                        elif key == "reviewer":
-                            sender = "Reviewer"
-                        elif key == "documenter":
-                            sender = "Documenter"
-                        
-                        # Update main chat window
-                        # Check for <thinking> blocks
-                        import re
-                        parts = re.split(r"(<thinking>.*?</thinking>)", content, flags=re.DOTALL)
-                        
-                        for part in parts:
-                            if not part.strip(): continue
-                            
-                            if part.strip().startswith("<thinking>"):
-                                # Style thinking block
-                                clean_thinking = part.replace("<thinking>", "").replace("</thinking>", "").strip()
-                                self.update_ui(self.chat_log.write, Text.from_markup(f"[dim italic]{escape(clean_thinking)}[/]"))
-                            elif "[SYSTEM ALERT]" in part:
-                                self.update_ui(self.chat_log.write, Text.from_markup(f"[bold white on red]{escape(part)}[/]"))
-                            else:
-                                self.update_ui(self.chat_log.write, Text.from_markup(f"[bold cyan]{sender}:[/] {escape(part)}"))
-                        elif isinstance(msg, ToolMessage):
+                        if isinstance(msg, ToolMessage):
                             # Render tool execution
-                            self.update_ui(self.chat_log.write, Text.from_markup(f"[bold blue]Tool ({msg.name}):[/] [dim]{escape(str(msg.content))[:200]}...[/]"))
+                            self.update_ui(self.chat_log.write, Text.from_markup(f"[bold blue]Tool ({escape(msg.name)}):[/] [dim]{escape(str(msg.content))[:200]}...[/]"))
+                        else:
+                            sender = "Unknown"
+                            
+                            # Normalize content (handle list format)
+                            content = msg.content
+                            if isinstance(content, list):
+                                content = "".join([str(item.get("text", "")) for item in content if item.get("type") == "text"])
+                            elif content is None:
+                                content = ""
+                            else:
+                                content = str(content)
+                            
+                            if key == "recaizade":
+                                sender = "Recaizade"
+                            elif key == "coder":
+                                sender = "Coder"
+                            elif key == "executor":
+                                sender = "Executor"
+                            elif key == "reviewer":
+                                sender = "Reviewer"
+                            elif key == "documenter":
+                                sender = "Documenter"
+                            
+                            # Update main chat window
+                            # Check for <thinking> blocks
+                            import re
+                            parts = re.split(r"(<thinking>.*?</thinking>)", content, flags=re.DOTALL)
+                            
+                            for part in parts:
+                                if not part.strip(): continue
+                                
+                                if part.strip().startswith("<thinking>"):
+                                    # Style thinking block
+                                    clean_thinking = part.replace("<thinking>", "").replace("</thinking>", "").strip()
+                                    self.update_ui(self.chat_log.write, Text.from_markup(f"[dim italic]{escape(clean_thinking)}[/]"))
+                                elif "[SYSTEM ALERT]" in part:
+                                    self.update_ui(self.chat_log.write, Text.from_markup(f"[bold white on red]{escape(part)}[/]"))
+                                else:
+                                    self.update_ui(self.chat_log.write, Text.from_markup(f"[bold cyan]{sender}:[/] {escape(part)}"))
                         
                         # Upadte history to keep sync (though graph keeps its own usually, 
                         # but we passed 'messages' as input. 
