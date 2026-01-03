@@ -1,12 +1,16 @@
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Input, RichLog, Static
-from textual.containers import Container, Vertical, Horizontal
-from textual import work
+from textual.widgets import Header, Footer, Input, RichLog, Static, Button, Switch, Label, TabbedContent, TabPane, Select
+from textual.containers import Container, Vertical, Horizontal, Grid
+from textual.screen import ModalScreen
+from textual import work, on
 from rich.text import Text
 from rich.markup import escape
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+import re
 
 from graph import app_graph
+from config_manager import config
+from agents import model_manager, refresh_prompts
 
 class ChatMessage(Static):
     def __init__(self, message, sender, **kwargs):
@@ -23,6 +27,58 @@ class ChatMessage(Static):
             color = "#bb9af7"
         
         yield Static(f"[{color}][bold]{self.sender}:[/][/] {self.message}")
+
+class SettingsScreen(ModalScreen):
+    def compose(self) -> ComposeResult:
+        with Container(id="settings-dialog"):
+            yield Label("Settings", id="settings-title")
+            with TabbedContent():
+                with TabPane("Models"):
+                    yield Label("Provider")
+                    yield Select([("Gemini", "gemini"), ("Ollama", "ollama")], value=config.get("provider"), id="provider-select")
+                    yield Label("Google API Key")
+                    yield Input(value=config.get("google_api_key"), password=True, id="api-key-input")
+                    yield Label("Ollama Base URL")
+                    yield Input(value=config.get("ollama_base_url"), id="ollama-url-input")
+                    
+                with TabPane("Behavior"):
+                    yield Label("Recaizade Temperature")
+                    yield Input(value=str(config.get("behavior", "temperature")), id="temp-input")
+                    yield Label("Crew Temperature")
+                    yield Input(value=str(config.get("behavior", "crew_temperature")), id="crew-temp-input")
+                    yield Horizontal(
+                        Label("Auto-Save Files"),
+                        Switch(value=config.get("behavior", "auto_save"), id="auto-save-switch"),
+                        classes="switch-container"
+                    )
+
+                with TabPane("Visuals"):
+                    yield Label("Theme")
+                    yield Select([("Tokyo Night", "tokyo-night"), ("Dracula", "dracula"), ("Light", "light")], value=config.get("visuals", "theme"), id="theme-select")
+                    yield Horizontal(
+                        Label("Wrap Text"),
+                        Switch(value=config.get("visuals", "wrap_text"), id="wrap-switch"),
+                        classes="switch-container"
+                    )
+            
+            with Horizontal(id="settings-buttons"):
+                yield Button("Save", variant="primary", id="save-settings")
+                yield Button("Cancel", variant="error", id="cancel-settings")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "save-settings":
+            config.set(self.query_one("#provider-select", Select).value, "provider")
+            config.set(self.query_one("#api-key-input", Input).value, "google_api_key")
+            config.set(self.query_one("#ollama-url-input", Input).value, "ollama_base_url")
+            config.set(float(self.query_one("#temp-input", Input).value), "behavior", "temperature")
+            config.set(float(self.query_one("#crew-temp-input", Input).value), "behavior", "crew_temperature")
+            config.set(self.query_one("#auto-save-switch", Switch).value, "behavior", "auto_save")
+            config.set(self.query_one("#theme-select", Select).value, "visuals", "theme")
+            config.set(self.query_one("#wrap-switch", Switch).value, "visuals", "wrap_text")
+            
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
 
 class RecaizadeApp(App):
     CSS = """
@@ -69,23 +125,117 @@ class RecaizadeApp(App):
     Footer {
         background: #1a1b26;
     }
+
+    /* Settings Styles */
+    #settings-dialog {
+        width: 60;
+        height: 40;
+        background: #24283b;
+        border: thick #7aa2f7;
+        padding: 1 2;
+    }
+
+    #settings-title {
+        text-align: center;
+        width: 100%;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    .switch-container {
+        height: auto;
+        margin: 1 0;
+    }
+
+    .switch-container Label {
+        width: 1fr;
+    }
+
+    #settings-buttons {
+        height: auto;
+        align: center middle;
+        margin-top: 1;
+    }
+
+    #settings-buttons Button {
+        margin: 0 1;
+    }
     """
+
+    BINDINGS = [
+        ("f2", "open_settings", "Settings"),
+        ("ctrl+q", "quit", "Quit")
+    ]
 
     def compose(self) -> ComposeResult:
         with Container(id="chat-container"):
-            yield RichLog(id="chat-log", highlight=True, markup=True, wrap=True)
+            yield RichLog(id="chat-log", highlight=True, markup=True, wrap=config.get("visuals", "wrap_text"))
         
         with Container(id="log-container"):
-            yield RichLog(id="debug-log", highlight=True, markup=True, wrap=True)
+            yield RichLog(id="debug-log", highlight=True, markup=True, wrap=config.get("visuals", "wrap_text"))
 
         yield Input(placeholder="Talk to Recaizade...", id="input-box")
         yield Header()
         yield Footer()
 
+    def action_open_settings(self) -> None:
+        self.push_screen(SettingsScreen(), self.apply_settings)
+
+    def apply_settings(self, changed: bool) -> None:
+        if changed:
+            # Re-initialize models
+            model_manager.reload_models()
+            refresh_prompts()
+            
+            # Apply UI changes
+            self.chat_log.wrap = config.get("visuals", "wrap_text")
+            self.debug_log.wrap = config.get("visuals", "wrap_text")
+            
+            # Update Theme
+            self.update_theme()
+            
+            # Re-render logs to apply wrap if needed
+            self.chat_log.refresh()
+            self.debug_log.refresh()
+            
+            self.debug_log.write(Text.from_markup("[bold green]System: Settings updated successfully.[/]"))
+
+    def update_theme(self):
+        theme = config.get("visuals", "theme")
+        if theme == "dracula":
+            bg = "#282a36"
+            fg = "#f8f8f2"
+            border = "#6272a4"
+            acc = "#bd93f9"
+        elif theme == "light":
+            bg = "#ffffff"
+            fg = "#000000"
+            border = "#cccccc"
+            acc = "#0000ff"
+        else: # tokyo-night
+            bg = "#1a1b26"
+            fg = "#c0caf5"
+            border = "#414868"
+            acc = "#7aa2f7"
+            
+        self.screen.styles.background = bg
+        self.screen.styles.color = fg
+        # Update specific elements via CSS injection or style updates
+        # For simplicity in this TUI, we can update the CSS variable or just set styles on containers
+        self.query_one("#chat-container").styles.border = ("round", border)
+        self.query_one("#log-container").styles.border = ("round", border)
+        self.chat_log.styles.background = bg
+        self.chat_log.styles.color = fg
+        self.debug_log.styles.background = bg
+        self.debug_log.styles.color = fg
+
     def on_mount(self):
         self.title = "Recaizade Crew"
         self.chat_log = self.query_one("#chat-log", RichLog)
         self.debug_log = self.query_one("#debug-log", RichLog)
+        
+        # Apply initial theme
+        self.update_theme()
         
         # Initialize graph state if needed, or just keep history in memory locally
         self.conversation_history = []
