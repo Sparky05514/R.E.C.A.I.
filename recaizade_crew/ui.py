@@ -73,10 +73,10 @@ class RecaizadeApp(App):
 
     def compose(self) -> ComposeResult:
         with Container(id="chat-container"):
-            yield RichLog(id="chat-log", highlight=True, markup=True)
+            yield RichLog(id="chat-log", highlight=True, markup=True, wrap=True)
         
         with Container(id="log-container"):
-            yield RichLog(id="debug-log", highlight=True, markup=True)
+            yield RichLog(id="debug-log", highlight=True, markup=True, wrap=True)
 
         yield Input(placeholder="Talk to Recaizade...", id="input-box")
         yield Header()
