@@ -5,10 +5,37 @@ from langchain_core.agents import AgentAction, AgentFinish
 import operator
 
 from agents import model_manager, RECAIZADE_SYSTEM_PROMPT, CODER_SYSTEM_PROMPT, EXECUTOR_SYSTEM_PROMPT, REVIEWER_SYSTEM_PROMPT, DOCUMENTER_SYSTEM_PROMPT
-from tools import read_file, write_file, list_directory, delete_file
+import tools as tool_funcs
+from config_manager import config
 
-# Define tools list for the agents to know about (even if we manually invoke them or bind them)
-tools = [read_file, write_file, list_directory, delete_file]
+# Map tool names to functions for dynamic invocation
+TOOL_MAP = {
+    "read_file": tool_funcs.read_file,
+    "write_file": tool_funcs.write_file,
+    "list_directory": tool_funcs.list_directory,
+    "delete_file": tool_funcs.delete_file,
+    "run_command": tool_funcs.run_command,
+    "run_python": tool_funcs.run_python,
+    "search_in_files": tool_funcs.search_in_files,
+    "move_file": tool_funcs.move_file,
+    "copy_file": tool_funcs.copy_file,
+    "append_to_file": tool_funcs.append_to_file,
+    "get_file_info": tool_funcs.get_file_info,
+    "get_project_structure": tool_funcs.get_project_structure,
+    "analyze_code": tool_funcs.analyze_code,
+    "find_references": tool_funcs.find_references,
+    "save_memory": tool_funcs.save_memory,
+    "recall_memory": tool_funcs.recall_memory,
+    "add_to_context": tool_funcs.add_to_context,
+    "web_search": tool_funcs.web_search,
+    "fetch_url": tool_funcs.fetch_url,
+    "read_webpage": tool_funcs.read_webpage
+}
+
+def get_tools_for_role(role: str):
+    """Returns tool functions assigned to the role from config."""
+    tool_names = config.get("behavior", "recaizade_tools") if role == "recaizade" else config.get("behavior", "crew_tools")
+    return [TOOL_MAP[name] for name in tool_names if name in TOOL_MAP]
 
 def invoke_model_with_fallback(role, input_data, bind_tools_list=None):
     """Invokes model with automatic fallback to Ollama on failure. Returns (response, alert_message)."""
@@ -50,83 +77,71 @@ class AgentState(TypedDict):
     task_description: str
     code_content: str
     review_status: str
+    waiting_confirmation: bool
+    pending_tool: dict
 
 # Nodes
 
-def recaizade_node(state: AgentState):
-    messages = list(state['messages']) # Make a copy to mutate locally
+def execute_tool_with_confirmation(tool_name, tool_args, tool_id, messages):
+    """Executes tool if safe or confirmed. Returns (result, needs_confirmation)."""
+    confirmation_level = config.get("behavior", "tool_confirmation")
+    is_dangerous = tool_name in tool_funcs.DANGEROUS_TOOLS
     
-    # ReAct Loop
-    MAX_ITERATIONS = 3
-    iterations = 0
-    final_alert = None
-    
-    while iterations < MAX_ITERATIONS:
-        # Invoke model
-        # For the first iteration, messages are just the state messages.
-        # For subsequent iterations, messages include the previous AIMessage (with tool calls) and ToolMessages.
-        response, alert = invoke_model_with_fallback("recaizade", [HumanMessage(content=RECAIZADE_SYSTEM_PROMPT)] + messages, bind_tools_list=tools)
-        if alert:
-            final_alert = alert # Keep the latest alert if any
-            
-        # Append response to local history
-        messages.append(response)
-        
-        # Check for tool calls
-        if not response.tool_calls:
-            # No tool calls, we have a final response
+    # Check if we already have an approval for this tool call in the context
+    approval_found = False
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage) and f"APPROVE_TOOL:{tool_name}:{tool_id}" in msg.content:
+            approval_found = True
             break
             
-        # Execute Tools
+    needs_confirm = False
+    if confirmation_level == "all":
+        needs_confirm = not approval_found
+    elif confirmation_level == "dangerous":
+        needs_confirm = is_dangerous and not approval_found
+    else: # auto
+        needs_confirm = False
+        
+    if needs_confirm:
+        return f"CONFIRMATION_REQUIRED:{tool_name}:{tool_id}", True
+        
+    # Execute
+    if tool_name in TOOL_MAP:
+        try:
+            result = TOOL_MAP[tool_name](**tool_args)
+            return str(result), False
+        except Exception as e:
+            return f"Error executing {tool_name}: {e}", False
+    return f"Error: Tool {tool_name} not found.", False
+
+def recaizade_node(state: AgentState):
+    messages = list(state['messages'])
+    role_tools = get_tools_for_role("recaizade")
+    
+    response, alert = invoke_model_with_fallback("recaizade", [HumanMessage(content=RECAIZADE_SYSTEM_PROMPT)] + messages, bind_tools_list=role_tools)
+    messages.append(response)
+    
+    if response.tool_calls:
         tool_outputs = []
         for tool_call in response.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
-            tool_id = tool_call["id"]
+            result, needs_confirm = execute_tool_with_confirmation(
+                tool_call["name"], tool_call["args"], tool_call["id"], state["messages"]
+            )
             
-            # Simple manual routing of tool calls
-            if tool_name == "read_file":
-                result = read_file(**tool_args)
-            elif tool_name == "write_file":
-                result = write_file(**tool_args)
-            elif tool_name == "list_directory":
-                result = list_directory(**tool_args)
-            elif tool_name == "delete_file":
-                result = delete_file(**tool_args)
-            else:
-                result = f"Error: Tool {tool_name} not found."
+            if needs_confirm:
+                # We stop execution and wait for UI
+                return {
+                    "messages": [response], 
+                    "waiting_confirmation": True, 
+                    "pending_tool": tool_call,
+                    "sender": "Recaizade"
+                }
             
-            # Create ToolMessage
-            tool_outputs.append(ToolMessage(
-                content=str(result),
-                tool_call_id=tool_id,
-                name=tool_name
-            ))
-            
-        # Append tool outputs to local history
-        messages.extend(tool_outputs)
-        iterations += 1
-    
-    # Final response processing
-    # If we exited the loop because of MAX_ITERATIONS and still have tool calls, we might want to warn.
-    # But usually the last response will be the text response if break occurred.
-    
-    # We want to return just the NEW messages generated during this node's execution (including tool calls and results, and final response)
-    # The state['messages'] has the original history. 'messages' has everything.
-    # Diff them? Or simplier: the 'messages' agent state annotation uses operator.add.
-    # So we just return the new messages appended.
-    
-    new_messages = messages[len(state['messages']):]
-    
-    # We also need to normalize content for the final AI message if needed, 
-    # but the loop handles the structure.
-    # The only thing is normalizing for the 'sender' check or logging if we want.
-    # For now, we trust the model's final response is text.
-    
-    if final_alert:
-        new_messages.insert(0, AIMessage(content=final_alert))
+            tool_outputs.append(ToolMessage(content=result, tool_call_id=tool_call["id"], name=tool_call["name"]))
         
-    return {"messages": new_messages, "sender": "Recaizade"}
+        return {"messages": [response] + tool_outputs, "sender": "Recaizade", "waiting_confirmation": False}
+        
+    return {"messages": [response], "sender": "Recaizade", "waiting_confirmation": False}
 
 def router(state: AgentState):
     # Check the last message. If it starts with /task, route to crew.
@@ -162,23 +177,17 @@ def format_messages_with_senders(messages):
 
 def coder_node(state: AgentState):
     task = state.get('task_description', '')
-    messages = list(state['messages']) # Copy
+    messages = list(state['messages'])
+    role_tools = get_tools_for_role("coder")
     
-    # Format conversation history for context
     conversation_context = format_messages_with_senders(messages)
     
-    # Read Bot Memory
     memory_context = ""
-    memory_content = read_file("bot_memory/memory.md")
+    memory_content = tool_funcs.read_file("bot_memory/memory.md")
     if not memory_content.startswith("Error"):
         memory_context = f"\n=== BOT MEMORY ===\n{memory_content}\n"
     
     system_prompt = f"""{CODER_SYSTEM_PROMPT}
-
-=== CREW CONTEXT ===
-- Executor: Implements code
-- Reviewer: Approves changes
-- Documenter: Reports progress
 
 === CURRENT TASK ===
 {task}
@@ -187,46 +196,32 @@ def coder_node(state: AgentState):
 {conversation_context}
 """
     
-    # ReAct Loop
-    MAX_ITERATIONS = 3
-    iterations = 0
-    final_alert = None
-    node_messages = []
-    loop_messages = [HumanMessage(content=system_prompt)]
+    response, alert = invoke_model_with_fallback("coder", [HumanMessage(content=system_prompt)], bind_tools_list=role_tools)
     
-    while iterations < MAX_ITERATIONS:
-        response, alert = invoke_model_with_fallback("coder", loop_messages, bind_tools_list=tools)
-        if alert: final_alert = alert
-        
-        content = normalize_content(response.content)
-        if content and not content.startswith("Coder:"):
-            response.content = f"Coder: {content}"
-        
-        node_messages.append(response)
-        loop_messages.append(response)
-        
-        if not response.tool_calls:
-            break
-            
+    content = normalize_content(response.content)
+    if content and not content.startswith("Coder:"):
+        response.content = f"Coder: {content}"
+    
+    if response.tool_calls:
+        tool_outputs = []
         for tool_call in response.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
-            tool_id = tool_call["id"]
+            result, needs_confirm = execute_tool_with_confirmation(
+                tool_call["name"], tool_call["args"], tool_call["id"], state["messages"]
+            )
             
-            if tool_name == "read_file": result = read_file(**tool_args)
-            elif tool_name == "write_file": result = write_file(**tool_args)
-            elif tool_name == "list_directory": result = list_directory(**tool_args)
-            elif tool_name == "delete_file": result = delete_file(**tool_args)
-            else: result = f"Error: Tool {tool_name} not found."
+            if needs_confirm:
+                return {
+                    "messages": [response], 
+                    "waiting_confirmation": True, 
+                    "pending_tool": tool_call,
+                    "sender": "Coder"
+                }
             
-            tool_msg = ToolMessage(content=str(result), tool_call_id=tool_id, name=tool_name)
-            node_messages.append(tool_msg)
-            loop_messages.append(tool_msg)
-        iterations += 1
+            tool_outputs.append(ToolMessage(content=result, tool_call_id=tool_call["id"], name=tool_call["name"]))
         
-    if final_alert:
-        node_messages.insert(0, AIMessage(content=final_alert))
-    return {"messages": node_messages, "sender": "Coder"}
+        return {"messages": [response] + tool_outputs, "sender": "Coder", "waiting_confirmation": False}
+        
+    return {"messages": [response], "sender": "Coder", "waiting_confirmation": False}
 
 def executor_node(state: AgentState):
     """Executor takes the Coder's output and implements it by writing files."""
@@ -304,67 +299,53 @@ I'll wait for updated instructions."""
     return {"messages": [AIMessage(content=response_content)], "sender": "Executor"}
 
 def reviewer_node(state: AgentState):
-    """Reviewer evaluates the work done by Coder and Executor."""
     messages = list(state['messages'])
+    role_tools = get_tools_for_role("reviewer")
     task = state.get('task_description', 'No task description available')
     conversation_context = format_messages_with_senders(messages)
     
     prompt = f"""{REVIEWER_SYSTEM_PROMPT}
-=== CREW CONTEXT ===
-Reviewing work of Coder and Executor.
 === ORIGINAL TASK ===
 {task}
 === CONVERSATION HISTORY ===
 {conversation_context}
 """
     
-    MAX_ITERATIONS = 3
-    iterations = 0
-    final_alert = None
-    node_messages = []
-    loop_messages = [HumanMessage(content=prompt)]
+    response, alert = invoke_model_with_fallback("reviewer", [HumanMessage(content=prompt)], bind_tools_list=role_tools)
     
-    while iterations < MAX_ITERATIONS:
-        response, alert = invoke_model_with_fallback("reviewer", loop_messages, bind_tools_list=tools)
-        if alert: final_alert = alert
-        
-        content = normalize_content(response.content)
-        if content and not content.startswith("Reviewer:"):
-            response.content = f"Reviewer: {content}"
+    content = normalize_content(response.content)
+    if content and not content.startswith("Reviewer:"):
+        response.content = f"Reviewer: {content}"
             
-        node_messages.append(response)
-        loop_messages.append(response)
-        
-        if not response.tool_calls:
-            break
-            
+    if response.tool_calls:
+        tool_outputs = []
         for tool_call in response.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
-            tool_id = tool_call["id"]
+            result, needs_confirm = execute_tool_with_confirmation(
+                tool_call["name"], tool_call["args"], tool_call["id"], state["messages"]
+            )
             
-            if tool_name == "read_file": result = read_file(**tool_args)
-            elif tool_name == "write_file": result = write_file(**tool_args)
-            elif tool_name == "list_directory": result = list_directory(**tool_args)
-            elif tool_name == "delete_file": result = delete_file(**tool_args)
-            else: result = f"Error: Tool {tool_name} not found."
+            if needs_confirm:
+                return {
+                    "messages": [response], 
+                    "waiting_confirmation": True, 
+                    "pending_tool": tool_call,
+                    "sender": "Reviewer"
+                }
             
-            tool_msg = ToolMessage(content=str(result), tool_call_id=tool_id, name=tool_name)
-            node_messages.append(tool_msg)
-            loop_messages.append(tool_msg)
-        iterations += 1
+            tool_outputs.append(ToolMessage(content=result, tool_call_id=tool_call["id"], name=tool_call["name"]))
         
+        node_messages = [response] + tool_outputs
+    else:
+        node_messages = [response]
+
     last_content = normalize_content(node_messages[-1].content)
     status = "APPROVED" if "REVIEW_PASSED" in last_content.upper() else "REJECTED"
     
-    if final_alert:
-        node_messages.insert(0, AIMessage(content=final_alert))
-        
-    return {"messages": node_messages, "sender": "Reviewer", "review_status": status}
+    return {"messages": node_messages, "sender": "Reviewer", "review_status": status, "waiting_confirmation": False}
 
 def documenter_node(state: AgentState):
-    """Documenter creates reports for user and memory for bots."""
     messages = list(state['messages'])
+    role_tools = get_tools_for_role("documenter")
     task = state.get('task_description', '')
     review_status = state.get('review_status', 'UNKNOWN')
     conversation_context = format_messages_with_senders(messages)
@@ -378,43 +359,32 @@ def documenter_node(state: AgentState):
 {conversation_context}
 """
     
-    MAX_ITERATIONS = 3
-    iterations = 0
-    final_alert = None
-    node_messages = []
-    loop_messages = [HumanMessage(content=prompt)]
+    response, alert = invoke_model_with_fallback("documenter", [HumanMessage(content=prompt)], bind_tools_list=role_tools)
     
-    while iterations < MAX_ITERATIONS:
-        response, alert = invoke_model_with_fallback("documenter", loop_messages, bind_tools_list=tools)
-        if alert: final_alert = alert
-        
-        content = normalize_content(response.content)
-        if content and not content.startswith("Documenter:"):
-            response.content = f"Documenter: {content}"
+    content = normalize_content(response.content)
+    if content and not content.startswith("Documenter:"):
+        response.content = f"Documenter: {content}"
             
-        node_messages.append(response)
-        loop_messages.append(response)
-        
-        if not response.tool_calls:
-            break
-            
+    if response.tool_calls:
+        tool_outputs = []
         for tool_call in response.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
-            tool_id = tool_call["id"]
+            result, needs_confirm = execute_tool_with_confirmation(
+                tool_call["name"], tool_call["args"], tool_call["id"], state["messages"]
+            )
             
-            if tool_name == "read_file": result = read_file(**tool_args)
-            elif tool_name == "write_file": result = write_file(**tool_args)
-            elif tool_name == "list_directory": result = list_directory(**tool_args)
-            elif tool_name == "delete_file": result = delete_file(**tool_args)
-            else: result = f"Error: Tool {tool_name} not found."
+            if needs_confirm:
+                return {
+                    "messages": [response], 
+                    "waiting_confirmation": True, 
+                    "pending_tool": tool_call,
+                    "sender": "Documenter"
+                }
             
-            tool_msg = ToolMessage(content=str(result), tool_call_id=tool_id, name=tool_name)
-            node_messages.append(tool_msg)
-            loop_messages.append(tool_msg)
-        iterations += 1
-        
-    # Final response extraction and reporting
+            tool_outputs.append(ToolMessage(content=result, tool_call_id=tool_call["id"], name=tool_call["name"]))
+        node_messages = [response] + tool_outputs
+    else:
+        node_messages = [response]
+
     final_content = normalize_content(node_messages[-1].content)
     
     import datetime
@@ -429,15 +399,12 @@ def documenter_node(state: AgentState):
     if memory_match: bot_memory = memory_match.group(1).strip()
         
     if user_report:
-        write_file(f"user_reports/report_{timestamp}.md", f"# Progress Report - {timestamp}\n\n{user_report}")
+        tool_funcs.write_file(f"user_reports/report_{timestamp}.md", f"# Progress Report - {timestamp}\n\n{user_report}")
     if bot_memory:
-        write_file("bot_memory/memory.md", bot_memory)
-        write_file(f"bot_memory/memory_{timestamp}.md", bot_memory)
+        tool_funcs.write_file("bot_memory/memory.md", bot_memory)
+        tool_funcs.write_file(f"bot_memory/memory_{timestamp}.md", bot_memory)
         
-    if final_alert:
-        node_messages.insert(0, AIMessage(content=final_alert))
-        
-    return {"messages": node_messages, "sender": "Documenter"}
+    return {"messages": node_messages, "sender": "Documenter", "waiting_confirmation": False}
 
 # Building the Graph
 workflow = StateGraph(AgentState)

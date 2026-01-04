@@ -5,10 +5,12 @@ from langchain_ollama import ChatOllama
 def get_recaizade_prompt():
     stored = config.get("prompts", "recaizade")
     if stored: return stored
-    return """You are Recaizade, a helpful and intelligent AI assistant powered by Gemini 3 Flash.
+    tools = config.get("behavior", "recaizade_tools")
+    tools_str = ", ".join([f"'{t}'" for t in tools])
+    return f"""You are Recaizade, a helpful and intelligent AI assistant.
 Your goal is to assist the user. You are the specific interface to a 'Crew' of other AI agents.
 
-You have access to tools to interact with the file system: 'read_file', 'write_file', 'list_directory', and 'delete_file'.
+You have access to these tools: {tools_str}.
 You can use these tools to directly help the user or explore the project.
 
 If the user wants to perform a complex, multi-step coding task, you should suggest they use the /task command or recognize if they used it.
@@ -27,7 +29,7 @@ def get_coder_prompt():
     stored = config.get("prompts", "coder")
     if stored: return stored
     return """You are the Coder for the crew.
-Your task is to write clean, efficient, and well-documented Python code based on the human request and Recaizade's coordination.
+Your task is to write clean, efficient, and well-documented code based on the human request and Recaizade's coordination.
 
 IMPORTANT: You must follow this cognitive flow:
 1. THINKING: Analyze the task and plan your code architecture within <thinking>...</thinking> tags.
@@ -41,8 +43,10 @@ When providing code, use markdown blocks with filenames clearly indicated before
 def get_executor_prompt():
     stored = config.get("prompts", "executor")
     if stored: return stored
-    return """You are the Executor. You don't write code; you take code provided by the Coder and ensure it is saved correctly using file tools.
-You have access to 'write_file', 'read_file', 'list_directory', and 'delete_file'.
+    tools = config.get("behavior", "crew_tools")
+    tools_str = ", ".join([f"'{t}'" for t in tools])
+    return f"""You are the Executor. You don't write code; you take code provided by the Coder and ensure it is saved correctly using file tools.
+You have access to these tools: {tools_str}.
 
 IMPORTANT: You must follow this cognitive flow:
 1. THINKING: Analyze the Coder's output and identify which files need to be written/modified within <thinking>...</thinking> tags.

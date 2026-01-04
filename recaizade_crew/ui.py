@@ -7,6 +7,7 @@ from rich.text import Text
 from rich.markup import escape
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 import re
+import json
 
 from graph import app_graph
 from config_manager import config
@@ -44,6 +45,33 @@ class SettingItem(ListItem):
                 yield Label(self.title, classes="setting-title")
                 yield Label(str(self.subtitle), classes="setting-subtitle")
 
+class ToolConfirmationScreen(ModalScreen):
+    """Modal screen for confirming tool execution."""
+    def __init__(self, tool_call: dict, **kwargs):
+        super().__init__(**kwargs)
+        self.tool_call = tool_call
+
+    def compose(self) -> ComposeResult:
+        tool_name = self.tool_call["name"]
+        args = json.dumps(self.tool_call["args"], indent=2)
+        
+        with Container(id="confirmation-container"):
+            yield Label("⚠️ TOOL CONFIRMATION REQUIRED", id="confirmation-title")
+            yield Label(f"Agent wants to execute tool: [bold cyan]{tool_name}[/]", id="confirmation-info")
+            yield Static(f"Arguments:\n{args}", id="confirmation-args")
+            with Horizontal(id="confirmation-buttons"):
+                yield Button("Approve", variant="success", id="btn-approve")
+                yield Button("Deny", variant="error", id="btn-deny")
+            yield Label("Approval will allow the tool to execute. Denial will skip it.", id="confirmation-hint")
+
+    @on(Button.Pressed, "#btn-approve")
+    def approve(self):
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#btn-deny")
+    def deny(self):
+        self.dismiss(False)
+
 class SettingsScreen(ModalScreen):
     BINDINGS = [
         ("escape", "dismiss", "Close"),
@@ -71,6 +99,9 @@ class SettingsScreen(ModalScreen):
                         yield SettingItem("Crew Temp", str(config.get("behavior", "crew_temperature")), "behavior.crew_temperature", config.get("behavior", "crew_temperature"))
                         yield SettingItem("Auto-Save", "Toggle auto-save behavior", "behavior.auto_save", config.get("behavior", "auto_save"), "switch")
                         yield SettingItem("Allowed Dirs", str(config.get("behavior", "allowed_directories")), "behavior.allowed_directories", ",".join(config.get("behavior", "allowed_directories")))
+                        yield SettingItem("Tool Confirmation", config.get("behavior", "tool_confirmation"), "behavior.tool_confirmation", config.get("behavior", "tool_confirmation"), "select", [("Auto", "auto"), ("Dangerous Only", "dangerous"), ("All Tools", "all")])
+                        yield SettingItem("Recaizade Tools", "Tools available to leader", "behavior.recaizade_tools", ",".join(config.get("behavior", "recaizade_tools")), "large_text")
+                        yield SettingItem("Crew Tools", "Tools available to crew", "behavior.crew_tools", ",".join(config.get("behavior", "crew_tools")), "large_text")
 
                         # Visuals
                         yield SettingItem("Theme", config.get("visuals", "theme"), "visuals.theme", config.get("visuals", "theme"), "select", [("Tokyo Night", "tokyo-night"), ("Dracula", "dracula"), ("Light", "light")])
@@ -107,22 +138,28 @@ class SettingsScreen(ModalScreen):
         pane = self.query_one("#settings-config-pane")
         pane.query("*").remove()
         
-        with self.app.batch_update():
-            pane.mount(Label(item.title, classes="config-title"))
-            if item.setting_type == "text":
-                pane.mount(Input(value=str(item.setting_value), id=f"edit-{item.key}"))
-            elif item.setting_type == "large_text":
-                pane.mount(TextArea(str(item.setting_value or ""), id=f"edit-{item.key}"))
-            elif item.setting_type == "select":
-                pane.mount(Select(item.options, value=item.setting_value, id=f"edit-{item.key}"))
-            elif item.setting_type == "switch":
-                pane.mount(Horizontal(
-                    Label("Enabled"),
-                    Switch(value=item.setting_value, id=f"edit-{item.key}"),
-                    classes="switch-row"
-                ))
-            
-            pane.mount(Static(f"\n{item.subtitle}", classes="config-description"))
+        # Create a safe ID by replacing dots with underscores
+        safe_id = item.key.replace('.', '_')
+        
+        pane.mount(Label(item.title, classes="config-title"))
+        if item.setting_type == "text":
+            pane.mount(Input(value=str(item.setting_value or ""), id=f"edit-{safe_id}"))
+        elif item.setting_type == "large_text":
+            pane.mount(TextArea(str(item.setting_value or ""), id=f"edit-{safe_id}"))
+        elif item.setting_type == "select":
+            # Ensure the value is in the options or use the first option as default
+            val = item.setting_value
+            if val not in [opt[1] for opt in item.options]:
+                val = item.options[0][1] if item.options else None
+            pane.mount(Select(item.options, value=val, id=f"edit-{safe_id}"))
+        elif item.setting_type == "switch":
+            pane.mount(Horizontal(
+                Label("Enabled"),
+                Switch(value=item.setting_value, id=f"edit-{safe_id}"),
+                classes="switch-row"
+            ))
+        
+        pane.mount(Static(f"\n{item.subtitle}", classes="config-description"))
 
     def on_key(self, event):
         if event.key == "enter":
@@ -168,9 +205,9 @@ class SettingsScreen(ModalScreen):
                 except ValueError:
                     return
 
-            # Handle list for directories
-            if item.key == "behavior.allowed_directories":
-                new_value = [d.strip() for d in str(new_value).split(',')]
+            # Handle list for directories or tools
+            if item.key in ["behavior.allowed_directories", "behavior.recaizade_tools", "behavior.crew_tools"]:
+                new_value = [d.strip() for d in str(new_value).split(',') if d.strip()]
 
             config.set(new_value, *key_parts)
             item.setting_value = new_value
@@ -181,6 +218,8 @@ class SettingsScreen(ModalScreen):
             self.app.apply_settings(True)
 
 class RecaizadeApp(App):
+    ENABLE_COMMAND_PALETTE = False  # Disable Textual's built-in palette, we use our own Settings screen
+    
     CSS = """
     Screen {
         background: #1a1b26;
@@ -209,7 +248,8 @@ class RecaizadeApp(App):
     }
 
     #input-box:focus {
-        border: tall #7aa2f7;
+        border: solid #7aa2f7;
+        background: #292e42;
     }
 
     RichLog {
@@ -229,12 +269,12 @@ class RecaizadeApp(App):
     /* Settings Screen Styles */
     #settings-container {
         width: 100;
-        height: 30;
+        height: 40;
         background: #1a1b26;
         border: thick #7aa2f7;
         padding: 0;
         align: center top;
-        margin-top: 4;
+        margin-top: 2;
     }
 
     #settings-search {
@@ -261,6 +301,8 @@ class RecaizadeApp(App):
 
     #settings-list {
         background: transparent;
+        height: 1fr;
+        scrollbar-gutter: stable;
     }
 
     SettingItem {
@@ -317,6 +359,45 @@ class RecaizadeApp(App):
         height: 10;
         border: solid #414868;
     }
+    
+    /* Confirmation Modal Styles */
+    #confirmation-container {
+        width: 60;
+        height: auto;
+        padding: 2;
+        background: #1a1b26;
+        border: thick #7aa2f7;
+    }
+    #confirmation-title {
+        text-align: center;
+        width: 100%;
+        text-style: bold;
+        color: #ff9e64;
+        margin-bottom: 1;
+    }
+    #confirmation-info {
+        margin-bottom: 1;
+    }
+    #confirmation-args {
+        background: #24283b;
+        padding: 1;
+        margin-bottom: 1;
+        height: auto;
+        max-height: 15;
+    }
+    #confirmation-buttons {
+        align: center middle;
+        height: 3;
+        margin-bottom: 1;
+    }
+    #confirmation-buttons Button {
+        margin: 0 2;
+    }
+    #confirmation-hint {
+        text-align: center;
+        text-style: italic;
+        color: #565f89;
+    }
     """
 
     BINDINGS = [
@@ -334,7 +415,7 @@ class RecaizadeApp(App):
 
         yield Input(placeholder="Talk to Recaizade...", id="input-box")
         yield Header()
-        yield Footer()
+        yield Footer(show_command_palette=False)
 
     def action_open_settings(self) -> None:
         self.push_screen(SettingsScreen(), self.apply_settings)
@@ -431,12 +512,25 @@ class RecaizadeApp(App):
             "next_node": "",
             "task_description": "",
             "code_content": "",
-            "review_status": ""
+            "review_status": "",
+            "waiting_confirmation": False,
+            "pending_tool": {}
         }
         
         # Streaming approach to see steps
         async for event in app_graph.astream(initial_state):
+            # Check for waiting_confirmation in state
+            if "waiting_confirmation" in event and event["waiting_confirmation"]:
+                tool_call = event["pending_tool"]
+                self.app.push_screen(ToolConfirmationScreen(tool_call), self.handle_confirmation)
+                return
+
             for key, value in event.items():
+                if isinstance(value, dict) and value.get("waiting_confirmation"):
+                    tool_call = value["pending_tool"]
+                    self.app.push_screen(ToolConfirmationScreen(tool_call), self.handle_confirmation)
+                    return
+                
                 # Value is the partial state update
                 self.update_ui(self.debug_log.write, Text.from_markup(f"[bold yellow]Step:[/] {key}"))
                 if "messages" in value:
@@ -471,8 +565,10 @@ class RecaizadeApp(App):
                                 sender = "Documenter"
                             
                             # Update main chat window
-                            # Check for <thinking> blocks
+                            # Strip out XML-like tags that models sometimes output
                             import re
+                            
+                            # First, extract and handle thinking blocks
                             parts = re.split(r"(<thinking>.*?</thinking>)", content, flags=re.DOTALL)
                             
                             for part in parts:
@@ -485,8 +581,11 @@ class RecaizadeApp(App):
                                 elif "[SYSTEM ALERT]" in part:
                                     self.update_ui(self.chat_log.write, Text.from_markup(f"[bold white on red]{escape(part)}[/]"))
                                 else:
-                                    sender_color = "#7dcfff" if sender == "Recaizade" else "#bb9af7"
-                                    self.update_ui(self.chat_log.write, Text.from_markup(f"[bold {sender_color}]{sender}:[/] {escape(part)}"))
+                                    # Clean up other XML-like tags (announcement, action, etc.)
+                                    clean_part = re.sub(r"</?\w+>", "", part).strip()
+                                    if clean_part:
+                                        sender_color = "#7dcfff" if sender == "Recaizade" else "#bb9af7"
+                                        self.update_ui(self.chat_log.write, Text.from_markup(f"[bold {sender_color}]{sender}:[/] {escape(clean_part)}"))
                         
                         # Upadte history to keep sync (though graph keeps its own usually, 
                         # but we passed 'messages' as input. 
@@ -498,6 +597,43 @@ class RecaizadeApp(App):
                         # if the graph is stateless between calls (which it is here as we re-invoke).
                         if msg not in self.conversation_history:
                             self.conversation_history.append(msg)
+                            
+    def handle_confirmation(self, approved: bool):
+        """Callback from ToolConfirmationScreen."""
+        if not self.conversation_history: return
+        
+        # Find the last message that was a tool-calling AI message
+        # In Recaizade Crew, the graph interrupts BEFORE tool execution.
+        # So the last message in history is the AIMessage with tool calls.
+        
+        last_msg = self.conversation_history[-1]
+        if not (isinstance(last_msg, AIMessage) and last_msg.tool_calls):
+            # Something went wrong with history sync
+            self.chat_log.write(Text.from_markup("[bold red]System Error: Could not find tool call to confirm.[/]"))
+            return
+
+        tool_call = last_msg.tool_calls[0] # For now, handle the first one
+        tool_name = tool_call["name"]
+        tool_id = tool_call["id"]
+
+        if approved:
+            self.chat_log.write(Text.from_markup(f"[bold green]System: Tool approved.[/]"))
+            # Add an invisible "approval" message to history
+            approval_msg = HumanMessage(content=f"APPROVE_TOOL:{tool_name}:{tool_id}")
+            self.conversation_history.append(approval_msg)
+            # Re-run graph - it will now see the approval and execute
+            self.run_graph("") 
+        else:
+            self.chat_log.write(Text.from_markup(f"[bold red]System: Tool denied.[/]"))
+            # Add a "denial" result as a ToolMessage to history so the model knows it was blocked
+            denial_msg = ToolMessage(
+                content=f"Error: Tool execution denied by user.",
+                tool_call_id=tool_id,
+                name=tool_name
+            )
+            self.conversation_history.append(denial_msg)
+            # Re-run graph - it will see the error and continue
+            self.run_graph("")
                             
     def update_ui(self, func, *args):
         # Textual helper to update UI from worker
