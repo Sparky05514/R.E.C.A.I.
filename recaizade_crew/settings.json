@@ -1,0 +1,30 @@
+{
+    "provider": "gemini",
+    "google_api_key": "AIzaSyBxnXTmRaRhem0wa2HTW9ns_9hiWfPrDVc",
+    "ollama_base_url": "http://localhost:11434",
+    "models": {
+        "gemini": "gemini-3-flash-preview",
+        "ollama_chat": "llama3.2",
+        "ollama_coder": "qwen2.5-coder"
+    },
+    "behavior": {
+        "temperature": 0.7,
+        "crew_temperature": 0.2,
+        "auto_save": true,
+        "allowed_directories": [
+            "."
+        ]
+    },
+    "visuals": {
+        "theme": "tokyo-night",
+        "wrap_text": true,
+        "log_verbosity": "normal"
+    },
+    "prompts": {
+        "recaizade": null,
+        "coder": null,
+        "reviewer": null,
+        "executor": null,
+        "documenter": null
+    }
+}

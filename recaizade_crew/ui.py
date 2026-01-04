@@ -164,6 +164,7 @@ class RecaizadeApp(App):
 
     BINDINGS = [
         ("f2", "open_settings", "Settings"),
+        ("ctrl+l", "clear_chat", "Clear Chat"),
         ("ctrl+q", "quit", "Quit")
     ]
 
@@ -199,6 +200,12 @@ class RecaizadeApp(App):
             self.debug_log.refresh()
             
             self.debug_log.write(Text.from_markup("[bold green]System: Settings updated successfully.[/]"))
+
+    def action_clear_chat(self) -> None:
+        self.chat_log.clear()
+        self.debug_log.clear()
+        self.conversation_history = []
+        self.chat_log.write(Text.from_markup("[bold green]System: Chat cleared and history reset.[/]"))
 
     def update_theme(self):
         theme = config.get("visuals", "theme")
