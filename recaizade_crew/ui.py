@@ -1,5 +1,5 @@
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Input, RichLog, Static, Button, Switch, Label, TabbedContent, TabPane, Select, ListItem, ListView, OptionList
+from textual.widgets import Header, Footer, Input, RichLog, Static, Button, Switch, Label, Select, ListItem, ListView, TextArea
 from textual.containers import Container, Vertical, Horizontal, Grid
 from textual.screen import ModalScreen
 from textual import work, on
@@ -47,46 +47,51 @@ class SettingItem(ListItem):
 class SettingsScreen(ModalScreen):
     BINDINGS = [
         ("escape", "dismiss", "Close"),
-        ("enter", "select_or_edit", "Select/Edit"),
+        ("ctrl+p", "dismiss", "Close"),
     ]
 
     def compose(self) -> ComposeResult:
         with Container(id="settings-container"):
-            with Horizontal(id="settings-layout"):
-                with Vertical(id="settings-sidebar"):
-                    yield Input(placeholder="Search settings...", id="settings-search")
+            yield Input(placeholder="Search settings...", id="settings-search")
+            with Horizontal(id="settings-body"):
+                with Vertical(id="settings-list-container"):
                     with ListView(id="settings-list"):
+                        # Model Configuration
                         yield SettingItem("Provider", config.get("provider"), "provider", config.get("provider"), "select", [("Gemini", "gemini"), ("Ollama", "ollama")])
+                        yield SettingItem("Gemini Model", config.get("models", "gemini"), "models.gemini", config.get("models", "gemini"))
+                        yield SettingItem("Ollama Chat Model", config.get("models", "ollama_chat"), "models.ollama_chat", config.get("models", "ollama_chat"))
+                        yield SettingItem("Ollama Coder Model", config.get("models", "ollama_coder"), "models.ollama_coder", config.get("models", "ollama_coder"))
+                        
+                        # API Setup / API Keys
                         yield SettingItem("Google API Key", "********" if config.get("google_api_key") else "Not Set", "google_api_key", config.get("google_api_key"))
                         yield SettingItem("Ollama Base URL", config.get("ollama_base_url"), "ollama_base_url", config.get("ollama_base_url"))
-                        yield SettingItem("Recaizade Temperature", str(config.get("behavior", "temperature")), "temperature", config.get("behavior", "temperature"))
-                        yield SettingItem("Crew Temperature", str(config.get("behavior", "crew_temperature")), "crew_temperature", config.get("behavior", "crew_temperature"))
-                        yield SettingItem("Theme", config.get("visuals", "theme"), "theme", config.get("visuals", "theme"), "select", [("Tokyo Night", "tokyo-night"), ("Dracula", "dracula"), ("Light", "light")])
-                        yield SettingItem("Auto-Save Files", "Toggle auto-save behavior", "auto_save", config.get("behavior", "auto_save"), "switch")
-                        yield SettingItem("Wrap Text", "Toggle text wrapping in logs", "wrap_text", config.get("visuals", "wrap_text"), "switch")
+                        
+                        # Behavior
+                        yield SettingItem("Recaizade Temp", str(config.get("behavior", "temperature")), "behavior.temperature", config.get("behavior", "temperature"))
+                        yield SettingItem("Crew Temp", str(config.get("behavior", "crew_temperature")), "behavior.crew_temperature", config.get("behavior", "crew_temperature"))
+                        yield SettingItem("Auto-Save", "Toggle auto-save behavior", "behavior.auto_save", config.get("behavior", "auto_save"), "switch")
+                        yield SettingItem("Allowed Dirs", str(config.get("behavior", "allowed_directories")), "behavior.allowed_directories", ",".join(config.get("behavior", "allowed_directories")))
+
+                        # Visuals
+                        yield SettingItem("Theme", config.get("visuals", "theme"), "visuals.theme", config.get("visuals", "theme"), "select", [("Tokyo Night", "tokyo-night"), ("Dracula", "dracula"), ("Light", "light")])
+                        yield SettingItem("Wrap Text", "Toggle text wrapping in logs", "visuals.wrap_text", config.get("visuals", "wrap_text"), "switch")
+                        yield SettingItem("Log Verbosity", config.get("visuals", "log_verbosity"), "visuals.log_verbosity", config.get("visuals", "log_verbosity"), "select", [("Normal", "normal"), ("Verbose", "verbose"), ("Quiet", "quiet")])
                 
+                        # Prompts
+                        yield SettingItem("Recaizade Prompt", "System prompt for leader", "prompts.recaizade", config.get("prompts", "recaizade"), "large_text")
+                        yield SettingItem("Coder Prompt", "System prompt for coder", "prompts.coder", config.get("prompts", "coder"), "large_text")
+                        yield SettingItem("Reviewer Prompt", "System prompt for reviewer", "prompts.reviewer", config.get("prompts", "reviewer"), "large_text")
+                        yield SettingItem("Executor Prompt", "System prompt for executor", "prompts.executor", config.get("prompts", "executor"), "large_text")
+                        yield SettingItem("Documenter Prompt", "System prompt for documenter", "prompts.documenter", config.get("prompts", "documenter"), "large_text")
+                        
                 with Vertical(id="settings-config-pane"):
-                    yield Static("Select a setting to edit", id="config-placeholder")
+                    yield Static("Choose a setting to configure", id="settings-placeholder")
             
-            yield Label("Navigate: [bold]↑↓[/] | Edit: [bold]Enter[/] | Close: [bold]Esc[/]", id="settings-footer")
+            yield Label(" [bold]CTRL+P[/] Settings | [bold]↑↓[/] Navigate | [bold]ENTER[/] Edit | [bold]ESC[/] Close ", id="settings-footer")
 
     def on_mount(self):
+        self.title = "Settings"
         self.query_one("#settings-search").focus()
-
-    def action_select_or_edit(self):
-        # If search is focused and list has items, focus the list
-        if self.query_one("#settings-search").has_focus:
-            lst = self.query_one("#settings-list")
-            if lst.visible_children:
-                lst.index = 0
-                lst.focus()
-        # If list is focused, focus the first interactive element in config pane
-        elif self.query_one("#settings-list").has_focus:
-            config_pane = self.query_one("#settings-config-pane")
-            inputs = config_pane.query("Input, Select, Switch")
-            if inputs:
-                inputs.first().focus()
-        # If an input/select/switch is focused, submitting it will trigger its own event
 
     @on(Input.Changed, "#settings-search")
     def filter_settings(self, event: Input.Changed):
@@ -95,7 +100,7 @@ class SettingsScreen(ModalScreen):
             item.display = search_term in item.title.lower() or search_term in str(item.subtitle).lower()
 
     @on(ListView.Highlighted)
-    def update_config_pane(self, event: ListView.Highlighted):
+    def switch_config(self, event: ListView.Highlighted):
         item = event.item
         if not item: return
         
@@ -103,9 +108,11 @@ class SettingsScreen(ModalScreen):
         pane.query("*").remove()
         
         with self.app.batch_update():
-            pane.mount(Label(f"Editing: {item.title}", classes="config-title"))
+            pane.mount(Label(item.title, classes="config-title"))
             if item.setting_type == "text":
                 pane.mount(Input(value=str(item.setting_value), id=f"edit-{item.key}"))
+            elif item.setting_type == "large_text":
+                pane.mount(TextArea(str(item.setting_value or ""), id=f"edit-{item.key}"))
             elif item.setting_type == "select":
                 pane.mount(Select(item.options, value=item.setting_value, id=f"edit-{item.key}"))
             elif item.setting_type == "switch":
@@ -117,14 +124,32 @@ class SettingsScreen(ModalScreen):
             
             pane.mount(Static(f"\n{item.subtitle}", classes="config-description"))
 
+    def on_key(self, event):
+        if event.key == "enter":
+            if self.query_one("#settings-search").has_focus:
+                # Move to list
+                lst = self.query_one("#settings-list")
+                if lst.visible_children:
+                    lst.focus()
+            elif self.query_one("#settings-list").has_focus:
+                # Move to edit pane
+                pane = self.query_one("#settings-config-pane")
+                inputs = pane.query("Input, Select, Switch, TextArea")
+                if inputs:
+                    inputs.first().focus()
+
     @on(Input.Submitted)
     @on(Select.Changed)
     @on(Switch.Changed)
-    def handle_value_change(self, event):
-        # Identify which setting we are editing
-        item = self.query_one("#settings-list").highlighted_child
+    def commit_change(self, event):
+        # We need to know which item is highlighted to save correctly
+        lst = self.query_one("#settings-list")
+        item = lst.highlighted_child
         if not item: return
 
+        # Extract path from key (e.g. "models.gemini" -> ["models", "gemini"])
+        key_parts = item.key.split('.')
+        
         new_value = None
         if isinstance(event, Input.Submitted):
             new_value = event.value
@@ -132,36 +157,28 @@ class SettingsScreen(ModalScreen):
             new_value = event.value
         elif isinstance(event, Switch.Changed):
             new_value = event.value
+        elif isinstance(event, TextArea.Changed):
+            new_value = event.text_area.text
 
         if new_value is not None:
-            self.save_setting(item, new_value)
-            # Update item visuals
+            # Handle numeric values for temperatures
+            if "temperature" in item.key or "temp" in item.key.lower():
+                try:
+                    new_value = float(new_value)
+                except ValueError:
+                    return
+
+            # Handle list for directories
+            if item.key == "behavior.allowed_directories":
+                new_value = [d.strip() for d in str(new_value).split(',')]
+
+            config.set(new_value, *key_parts)
             item.setting_value = new_value
-            if item.setting_type != "switch": # Switches in sidebar update via event or we can just ignore them there
+            if item.setting_type not in ["switch", "large_text"]:
                 item.query_one(".setting-subtitle").update(str(new_value))
             
-            # Show success briefly
-            self.notify(f"Saved {item.title}", severity="information", timeout=2)
-
-    def save_setting(self, item: SettingItem, value: any):
-        if item.key == "provider":
-            config.set(value, "provider")
-        elif item.key == "google_api_key":
-            config.set(value, "google_api_key")
-        elif item.key == "ollama_base_url":
-            config.set(value, "ollama_base_url")
-        elif item.key == "temperature":
-            config.set(float(value), "behavior", "temperature")
-        elif item.key == "crew_temperature":
-            config.set(float(value), "behavior", "crew_temperature")
-        elif item.key == "theme":
-            config.set(value, "visuals", "theme")
-        elif item.key == "auto_save":
-            config.set(value, "behavior", "auto_save")
-        elif item.key == "wrap_text":
-            config.set(value, "visuals", "wrap_text")
-        
-        self.app.apply_settings(True)
+            self.notify(f"Updated {item.title}", timeout=2)
+            self.app.apply_settings(True)
 
 class RecaizadeApp(App):
     CSS = """
@@ -209,101 +226,101 @@ class RecaizadeApp(App):
         background: #1a1b26;
     }
 
-    /* Settings Palette Styles */
+    /* Settings Screen Styles */
     #settings-container {
         width: 100;
-        height: 35;
-        background: #24283b;
+        height: 30;
+        background: #1a1b26;
         border: thick #7aa2f7;
         padding: 0;
-        align: center middle;
-    }
-
-    #settings-layout {
-        height: 1fr;
-    }
-
-    #settings-sidebar {
-        width: 40;
-        border-right: solid #414868;
+        align: center top;
+        margin-top: 4;
     }
 
     #settings-search {
         border: none;
-        background: #1a1b26;
-        color: #c0caf5;
-        margin: 0;
+        background: #16161e;
+        color: #7aa2f7;
         padding: 1 2;
+        text-style: bold;
     }
 
     #settings-search:focus {
         border: none;
-        background: #24283b;
+    }
+
+    #settings-body {
+        height: 1fr;
+    }
+
+    #settings-list-container {
+        width: 40;
+        border-right: solid #414868;
+        background: #1a1b26;
     }
 
     #settings-list {
-        height: 1fr;
-        background: #1a1b26;
+        background: transparent;
     }
 
     SettingItem {
         padding: 0 1;
         border-bottom: solid #414868;
-        height: 4;
+        height: 3;
     }
 
     SettingItem:focus {
-        background: #2e3440;
+        background: #24283b;
     }
 
     SettingItem .setting-title {
+        color: #c0caf5;
         text-style: bold;
-        color: #7aa2f7;
-        margin-top: 1;
+    }
+
+    SettingItem .setting-subtitle {
+        color: #565f89;
+        text-style: italic;
     }
 
     #settings-config-pane {
         width: 1fr;
-        background: #24283b;
         padding: 2;
+        background: #1a1b26;
     }
 
     .config-title {
-        text-style: bold;
         color: #bb9af7;
+        text-style: bold;
         margin-bottom: 1;
     }
 
     .config-description {
         color: #565f89;
-        margin-top: 1;
-    }
-
-    .switch-row {
-        height: auto;
-        align: left middle;
-    }
-
-    .switch-row Label {
-        width: 1fr;
     }
 
     #settings-footer {
-        text-align: center;
-        width: 100%;
-        background: #1a1b26;
+        background: #16161e;
         color: #565f89;
+        text-align: center;
         padding: 0 1;
     }
 
-    #settings-config-pane Input, #settings-config-pane Select {
+    /* Input focus in settings */
+    #settings-config-pane Input, #settings-config-pane Select, #settings-config-pane TextArea {
         width: 100%;
-        margin-top: 1;
+        background: #24283b;
+        border: solid #7aa2f7;
+    }
+
+    #settings-config-pane TextArea {
+        height: 10;
+        border: solid #414868;
     }
     """
 
     BINDINGS = [
-        ("f2", "open_settings", "Settings"),
+        ("ctrl+p", "open_settings", "Settings"),
         ("ctrl+l", "clear_chat", "Clear Chat"),
         ("ctrl+q", "quit", "Quit")
     ]
