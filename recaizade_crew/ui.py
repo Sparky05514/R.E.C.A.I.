@@ -1,5 +1,5 @@
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Input, RichLog, Static, Button, Switch, Label, TabbedContent, TabPane, Select
+from textual.widgets import Header, Footer, Input, RichLog, Static, Button, Switch, Label, TabbedContent, TabPane, Select, ListItem, ListView, OptionList
 from textual.containers import Container, Vertical, Horizontal, Grid
 from textual.screen import ModalScreen
 from textual import work, on
@@ -28,57 +28,140 @@ class ChatMessage(Static):
         
         yield Static(f"[{color}][bold]{self.sender}:[/][/] {self.message}")
 
-class SettingsScreen(ModalScreen):
+class SettingItem(ListItem):
+    def __init__(self, title: str, subtitle: str, key: str, value: any, setting_type: str = "text", options: list = None):
+        super().__init__()
+        self.title = title
+        self.subtitle = subtitle
+        self.key = key
+        self.setting_value = value
+        self.setting_type = setting_type
+        self.options = options
+
     def compose(self) -> ComposeResult:
-        with Container(id="settings-dialog"):
-            yield Label("Settings", id="settings-title")
-            with TabbedContent():
-                with TabPane("Models"):
-                    yield Label("Provider")
-                    yield Select([("Gemini", "gemini"), ("Ollama", "ollama")], value=config.get("provider"), id="provider-select")
-                    yield Label("Google API Key")
-                    yield Input(value=config.get("google_api_key"), password=True, id="api-key-input")
-                    yield Label("Ollama Base URL")
-                    yield Input(value=config.get("ollama_base_url"), id="ollama-url-input")
-                    
-                with TabPane("Behavior"):
-                    yield Label("Recaizade Temperature")
-                    yield Input(value=str(config.get("behavior", "temperature")), id="temp-input")
-                    yield Label("Crew Temperature")
-                    yield Input(value=str(config.get("behavior", "crew_temperature")), id="crew-temp-input")
-                    yield Horizontal(
-                        Label("Auto-Save Files"),
-                        Switch(value=config.get("behavior", "auto_save"), id="auto-save-switch"),
-                        classes="switch-container"
-                    )
+        with Horizontal():
+            with Vertical():
+                yield Label(self.title, classes="setting-title")
+                yield Label(str(self.subtitle), classes="setting-subtitle")
 
-                with TabPane("Visuals"):
-                    yield Label("Theme")
-                    yield Select([("Tokyo Night", "tokyo-night"), ("Dracula", "dracula"), ("Light", "light")], value=config.get("visuals", "theme"), id="theme-select")
-                    yield Horizontal(
-                        Label("Wrap Text"),
-                        Switch(value=config.get("visuals", "wrap_text"), id="wrap-switch"),
-                        classes="switch-container"
-                    )
-            
-            with Horizontal(id="settings-buttons"):
-                yield Button("Save", variant="primary", id="save-settings")
-                yield Button("Cancel", variant="error", id="cancel-settings")
+class SettingsScreen(ModalScreen):
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("enter", "select_or_edit", "Select/Edit"),
+    ]
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "save-settings":
-            config.set(self.query_one("#provider-select", Select).value, "provider")
-            config.set(self.query_one("#api-key-input", Input).value, "google_api_key")
-            config.set(self.query_one("#ollama-url-input", Input).value, "ollama_base_url")
-            config.set(float(self.query_one("#temp-input", Input).value), "behavior", "temperature")
-            config.set(float(self.query_one("#crew-temp-input", Input).value), "behavior", "crew_temperature")
-            config.set(self.query_one("#auto-save-switch", Switch).value, "behavior", "auto_save")
-            config.set(self.query_one("#theme-select", Select).value, "visuals", "theme")
-            config.set(self.query_one("#wrap-switch", Switch).value, "visuals", "wrap_text")
+    def compose(self) -> ComposeResult:
+        with Container(id="settings-container"):
+            with Horizontal(id="settings-layout"):
+                with Vertical(id="settings-sidebar"):
+                    yield Input(placeholder="Search settings...", id="settings-search")
+                    with ListView(id="settings-list"):
+                        yield SettingItem("Provider", config.get("provider"), "provider", config.get("provider"), "select", [("Gemini", "gemini"), ("Ollama", "ollama")])
+                        yield SettingItem("Google API Key", "********" if config.get("google_api_key") else "Not Set", "google_api_key", config.get("google_api_key"))
+                        yield SettingItem("Ollama Base URL", config.get("ollama_base_url"), "ollama_base_url", config.get("ollama_base_url"))
+                        yield SettingItem("Recaizade Temperature", str(config.get("behavior", "temperature")), "temperature", config.get("behavior", "temperature"))
+                        yield SettingItem("Crew Temperature", str(config.get("behavior", "crew_temperature")), "crew_temperature", config.get("behavior", "crew_temperature"))
+                        yield SettingItem("Theme", config.get("visuals", "theme"), "theme", config.get("visuals", "theme"), "select", [("Tokyo Night", "tokyo-night"), ("Dracula", "dracula"), ("Light", "light")])
+                        yield SettingItem("Auto-Save Files", "Toggle auto-save behavior", "auto_save", config.get("behavior", "auto_save"), "switch")
+                        yield SettingItem("Wrap Text", "Toggle text wrapping in logs", "wrap_text", config.get("visuals", "wrap_text"), "switch")
+                
+                with Vertical(id="settings-config-pane"):
+                    yield Static("Select a setting to edit", id="config-placeholder")
             
-            self.dismiss(True)
-        else:
-            self.dismiss(False)
+            yield Label("Navigate: [bold]↑↓[/] | Edit: [bold]Enter[/] | Close: [bold]Esc[/]", id="settings-footer")
+
+    def on_mount(self):
+        self.query_one("#settings-search").focus()
+
+    def action_select_or_edit(self):
+        # If search is focused and list has items, focus the list
+        if self.query_one("#settings-search").has_focus:
+            lst = self.query_one("#settings-list")
+            if lst.visible_children:
+                lst.index = 0
+                lst.focus()
+        # If list is focused, focus the first interactive element in config pane
+        elif self.query_one("#settings-list").has_focus:
+            config_pane = self.query_one("#settings-config-pane")
+            inputs = config_pane.query("Input, Select, Switch")
+            if inputs:
+                inputs.first().focus()
+        # If an input/select/switch is focused, submitting it will trigger its own event
+
+    @on(Input.Changed, "#settings-search")
+    def filter_settings(self, event: Input.Changed):
+        search_term = event.value.lower()
+        for item in self.query(SettingItem):
+            item.display = search_term in item.title.lower() or search_term in str(item.subtitle).lower()
+
+    @on(ListView.Highlighted)
+    def update_config_pane(self, event: ListView.Highlighted):
+        item = event.item
+        if not item: return
+        
+        pane = self.query_one("#settings-config-pane")
+        pane.query("*").remove()
+        
+        with self.app.batch_update():
+            pane.mount(Label(f"Editing: {item.title}", classes="config-title"))
+            if item.setting_type == "text":
+                pane.mount(Input(value=str(item.setting_value), id=f"edit-{item.key}"))
+            elif item.setting_type == "select":
+                pane.mount(Select(item.options, value=item.setting_value, id=f"edit-{item.key}"))
+            elif item.setting_type == "switch":
+                pane.mount(Horizontal(
+                    Label("Enabled"),
+                    Switch(value=item.setting_value, id=f"edit-{item.key}"),
+                    classes="switch-row"
+                ))
+            
+            pane.mount(Static(f"\n{item.subtitle}", classes="config-description"))
+
+    @on(Input.Submitted)
+    @on(Select.Changed)
+    @on(Switch.Changed)
+    def handle_value_change(self, event):
+        # Identify which setting we are editing
+        item = self.query_one("#settings-list").highlighted_child
+        if not item: return
+
+        new_value = None
+        if isinstance(event, Input.Submitted):
+            new_value = event.value
+        elif isinstance(event, Select.Changed):
+            new_value = event.value
+        elif isinstance(event, Switch.Changed):
+            new_value = event.value
+
+        if new_value is not None:
+            self.save_setting(item, new_value)
+            # Update item visuals
+            item.setting_value = new_value
+            if item.setting_type != "switch": # Switches in sidebar update via event or we can just ignore them there
+                item.query_one(".setting-subtitle").update(str(new_value))
+            
+            # Show success briefly
+            self.notify(f"Saved {item.title}", severity="information", timeout=2)
+
+    def save_setting(self, item: SettingItem, value: any):
+        if item.key == "provider":
+            config.set(value, "provider")
+        elif item.key == "google_api_key":
+            config.set(value, "google_api_key")
+        elif item.key == "ollama_base_url":
+            config.set(value, "ollama_base_url")
+        elif item.key == "temperature":
+            config.set(float(value), "behavior", "temperature")
+        elif item.key == "crew_temperature":
+            config.set(float(value), "behavior", "crew_temperature")
+        elif item.key == "theme":
+            config.set(value, "visuals", "theme")
+        elif item.key == "auto_save":
+            config.set(value, "behavior", "auto_save")
+        elif item.key == "wrap_text":
+            config.set(value, "visuals", "wrap_text")
+        
+        self.app.apply_settings(True)
 
 class RecaizadeApp(App):
     CSS = """
@@ -126,39 +209,96 @@ class RecaizadeApp(App):
         background: #1a1b26;
     }
 
-    /* Settings Styles */
-    #settings-dialog {
-        width: 60;
-        height: 40;
+    /* Settings Palette Styles */
+    #settings-container {
+        width: 100;
+        height: 35;
         background: #24283b;
         border: thick #7aa2f7;
+        padding: 0;
+        align: center middle;
+    }
+
+    #settings-layout {
+        height: 1fr;
+    }
+
+    #settings-sidebar {
+        width: 40;
+        border-right: solid #414868;
+    }
+
+    #settings-search {
+        border: none;
+        background: #1a1b26;
+        color: #c0caf5;
+        margin: 0;
         padding: 1 2;
     }
 
-    #settings-title {
-        text-align: center;
-        width: 100%;
+    #settings-search:focus {
+        border: none;
+        background: #24283b;
+    }
+
+    #settings-list {
+        height: 1fr;
+        background: #1a1b26;
+    }
+
+    SettingItem {
+        padding: 0 1;
+        border-bottom: solid #414868;
+        height: 4;
+    }
+
+    SettingItem:focus {
+        background: #2e3440;
+    }
+
+    SettingItem .setting-title {
         text-style: bold;
-        margin-bottom: 1;
-    }
-
-    .switch-container {
-        height: auto;
-        margin: 1 0;
-    }
-
-    .switch-container Label {
-        width: 1fr;
-    }
-
-    #settings-buttons {
-        height: auto;
-        align: center middle;
+        color: #7aa2f7;
         margin-top: 1;
     }
 
-    #settings-buttons Button {
-        margin: 0 1;
+    #settings-config-pane {
+        width: 1fr;
+        background: #24283b;
+        padding: 2;
+    }
+
+    .config-title {
+        text-style: bold;
+        color: #bb9af7;
+        margin-bottom: 1;
+    }
+
+    .config-description {
+        color: #565f89;
+        margin-top: 1;
+    }
+
+    .switch-row {
+        height: auto;
+        align: left middle;
+    }
+
+    .switch-row Label {
+        width: 1fr;
+    }
+
+    #settings-footer {
+        text-align: center;
+        width: 100%;
+        background: #1a1b26;
+        color: #565f89;
+        padding: 0 1;
+    }
+
+    #settings-config-pane Input, #settings-config-pane Select {
+        width: 100%;
+        margin-top: 1;
     }
     """
 

@@ -10,7 +10,7 @@
     "behavior": {
         "temperature": 0.7,
         "crew_temperature": 0.2,
-        "auto_save": true,
+        "auto_save": false,
         "allowed_directories": [
             "."
         ]

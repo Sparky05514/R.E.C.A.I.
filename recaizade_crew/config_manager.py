@@ -1,6 +1,10 @@
 import json
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env
+load_dotenv()
 
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
 
