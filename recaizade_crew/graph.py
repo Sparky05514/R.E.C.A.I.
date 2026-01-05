@@ -267,7 +267,7 @@ def executor_node(state: AgentState):
         
         if file_matches:
             filename = file_matches[-1].group(1).strip()
-            result = write_file(filename, code)
+            result = tool_funcs.write_file(filename, code)
             executed_files.append(f"  - {filename}: {result}")
         else:
              # Try to find it in the first line of the code block if it was a comment?
