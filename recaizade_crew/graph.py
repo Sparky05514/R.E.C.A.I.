@@ -143,18 +143,67 @@ def recaizade_node(state: AgentState):
         
     return {"messages": [response], "sender": "Recaizade", "waiting_confirmation": False}
 
-def router(state: AgentState):
-    # Check the last message. If it starts with /task, route to crew.
-    last_msg = state['messages'][-1]
-    if isinstance(last_msg, HumanMessage) and last_msg.content.strip().startswith("/task"):
-        # Extract task
-        task = last_msg.content.replace("/task", "").strip()
-        # Initialize task description
-        return {"next_node": "coder", "task_description": task}
-    elif isinstance(last_msg, AIMessage) and "crew" in last_msg.content.lower() and "start" in last_msg.content.lower():
-         # Maybe Recaizade triggered it? For now, let's stick to user explicit command or Recaizade calling a tool.
-         pass
-    return {"next_node": "end"}
+def router_node(state: AgentState):
+    """Initial node to process input, identify tasks, and route to the correct agent."""
+    messages = state.get('messages', [])
+    if not messages:
+        return {"next_node": "recaizade"}
+        
+    last_msg = messages[-1]
+    content = normalize_content(last_msg.content)
+    
+    # Default routing
+    res = {"next_node": "recaizade"}
+    
+    # 1. Check for /task command
+    if isinstance(last_msg, HumanMessage) and content.strip().startswith("/task"):
+        res["task_description"] = content.replace("/task", "").strip()
+        res["next_node"] = "coder"
+        return res
+        
+    # 2. Check for tool confirmation/results to continue previous flow
+    is_continuation = False
+    if isinstance(last_msg, ToolMessage):
+        is_continuation = True
+    elif isinstance(last_msg, HumanMessage) and ("APPROVE_TOOL" in content or "DENY_TOOL" in content):
+        is_continuation = True
+        
+    if is_continuation:
+        # Find the agent that was last active
+        for i in range(len(messages)-1, -1, -1):
+            msg = messages[i]
+            if isinstance(msg, AIMessage):
+                c = normalize_content(msg.content)
+                if c.startswith("Coder:"): 
+                    res["next_node"] = "coder"
+                    break
+                elif c.startswith("Reviewer:"): 
+                    res["next_node"] = "reviewer"
+                    break
+                elif c.startswith("Documenter:"): 
+                    res["next_node"] = "documenter"
+                    break
+                elif c.startswith("Executor:"): 
+                    res["next_node"] = "executor"
+                    break
+                # If no prefix, assume Recaizade
+                res["next_node"] = "recaizade"
+                break
+                
+    # 3. Maintain task_description if we are in a crew flow
+    if not res.get("task_description"):
+        for m in reversed(messages):
+            if isinstance(m, HumanMessage):
+                c = normalize_content(m.content)
+                if c.strip().startswith("/task"):
+                    res["task_description"] = c.replace("/task", "").strip()
+                    break
+                    
+    return res
+
+def route_input(state: AgentState):
+    """Dynamic routing logic for the router node."""
+    return state.get("next_node", "recaizade")
 
 def format_messages_with_senders(messages):
     """Format messages with sender attribution for crew context."""
@@ -415,23 +464,19 @@ workflow.add_node("executor", executor_node)
 workflow.add_node("reviewer", reviewer_node)
 workflow.add_node("documenter", documenter_node)
 
-# We need a custom entrypoint logic or just start at recaizade usually.
-# But for /task, we might intercept before Recaizade?
-# Let's say the TUI sends the message to the graph.
+workflow.add_node("router", router_node)
 
-def route_start(state: AgentState):
-    # If last message is /task, go to Coder (start crew)
-    # Else go to Recaizade
-    last_msg = state['messages'][-1]
-    if isinstance(last_msg, HumanMessage) and last_msg.content.strip().startswith("/task"):
-        return "coder"
-    return "recaizade"
+workflow.set_entry_point("router")
 
-workflow.set_conditional_entry_point(
-    route_start,
+workflow.add_conditional_edges(
+    "router",
+    route_input,
     {
         "coder": "coder",
-        "recaizade": "recaizade"
+        "recaizade": "recaizade",
+        "executor": "executor",
+        "reviewer": "reviewer",
+        "documenter": "documenter"
     }
 )
 
@@ -445,6 +490,14 @@ workflow.add_edge("reviewer", "documenter") # Reviewer -> Documenter
 
 def route_documenter(state: AgentState):
     # After documentation, check if we are done based on reviewer status
+    # Also check if there was a systemic failure (don't loop if models are failing)
+    messages = state.get('messages', [])
+    if messages:
+        last_msg = messages[-1]
+        content = normalize_content(last_msg.content)
+        if "[SYSTEM ALERT]" in content:
+            return "end"
+
     if state.get("review_status") == "APPROVED":
         return "end"
     else:

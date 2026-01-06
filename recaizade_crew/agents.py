@@ -147,6 +147,11 @@ class ModelManager:
             else: # executor, reviewer, documenter
                 return self.models['crew_chat']
 
+    def switch_to_ollama(self):
+        """Switches the provider to Ollama and re-initializes models."""
+        self.provider = "ollama"
+        self._initialize_ollama()
+
 # Initialize Manager
 model_manager = ModelManager()
 
