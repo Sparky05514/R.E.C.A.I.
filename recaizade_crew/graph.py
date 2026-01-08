@@ -4,7 +4,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMe
 from langchain_core.agents import AgentAction, AgentFinish
 import operator
 
-from agents import model_manager, RECAIZADE_SYSTEM_PROMPT, CODER_SYSTEM_PROMPT, EXECUTOR_SYSTEM_PROMPT, REVIEWER_SYSTEM_PROMPT, DOCUMENTER_SYSTEM_PROMPT
+from agents import model_manager
 import tools as tool_funcs
 from config_manager import config
 
@@ -34,32 +34,58 @@ TOOL_MAP = {
 
 def get_tools_for_role(role: str):
     """Returns tool functions assigned to the role from config."""
-    tool_names = config.get("behavior", "recaizade_tools") if role == "recaizade" else config.get("behavior", "crew_tools")
+    config_key = f"{role}_tools"
+    tool_names = config.get("behavior", config_key)
+    if not tool_names:
+        # Fallback for recaizade if not found
+        tool_names = config.get("behavior", "recaizade_tools") if role == "recaizade" else []
+    
     return [TOOL_MAP[name] for name in tool_names if name in TOOL_MAP]
 
-def invoke_model_with_fallback(role, input_data, bind_tools_list=None):
-    """Invokes model with automatic fallback to Ollama on failure. Returns (response, alert_message)."""
+async def invoke_model_with_fallback(role, input_data, bind_tools_list=None):
+    """Invokes model with automatic fallback from Gemini to Ollama."""
+    alert_msg = None
     try:
         model = model_manager.get_model(role)
-        if bind_tools_list:
+        # Only bind tools if using Gemini and tools are provided
+        if model_manager.provider == "gemini" and bind_tools_list:
             model = model.bind_tools(bind_tools_list)
-        return model.invoke(input_data), None
+        
+        # Use ainvoke for async compatibility
+        response = await model.ainvoke(input_data)
+        return response, alert_msg
+        
     except Exception as e:
         error_str = str(e)
         # If we are already on Ollama and it fails, return error message
         if model_manager.provider == "ollama":
             return AIMessage(content=f"[SYSTEM ALERT] Critical Error: Local model (Ollama) failed or is unreachable: {error_str}"), None
             
-        # If we are on Gemini, attempt fallback
-        alert_msg = f"[SYSTEM ALERT] API Error: {error_str}. Switching to Ollama..."
-        print(alert_msg) 
+        # Parse error for more detail
+        reason = "Unknown API Error"
+        if "429" in error_str or "quota" in error_str.lower() or "limit" in error_str.lower():
+            reason = "Rate limit exceeded or Quota exhausted"
+        elif "401" in error_str or "key" in error_str.lower():
+            reason = "Invalid or expired API Key"
+        elif "503" in error_str or "unavailable" in error_str.lower():
+            reason = "Service unavailable"
+        elif "dead" in error_str.lower() or "timeout" in error_str.lower():
+            reason = "Connection timeout"
+            
+        alert_msg = f"[SYSTEM ALERT] Gemini Failure ({reason}): {error_str}. Switching to Ollama..."
+        print(alert_msg)
+        
+        # Fallback to Ollama
         model_manager.switch_to_ollama()
         
         try:
             model = model_manager.get_model(role)
-            if bind_tools_list:
+            # Re-check tools for Ollama (usually we don't bind tools for Ollama)
+            if model_manager.provider == "gemini" and bind_tools_list:
                 model = model.bind_tools(bind_tools_list)
-            return model.invoke(input_data), alert_msg
+            
+            response = await model.ainvoke(input_data)
+            return response, alert_msg
         except Exception as e2:
             return AIMessage(content=f"[SYSTEM ALERT] Critical Error: Fallback to Ollama failed: {e2}"), alert_msg
 
@@ -114,12 +140,17 @@ def execute_tool_with_confirmation(tool_name, tool_args, tool_id, messages):
             return f"Error executing {tool_name}: {e}", False
     return f"Error: Tool {tool_name} not found.", False
 
-def recaizade_node(state: AgentState):
+async def recaizade_node(state: AgentState):
     messages = list(state['messages'])
     role_tools = get_tools_for_role("recaizade")
+    system_prompt = model_manager.get_system_prompt("recaizade")
     
-    response, alert = invoke_model_with_fallback("recaizade", [HumanMessage(content=RECAIZADE_SYSTEM_PROMPT)] + messages, bind_tools_list=role_tools)
-    messages.append(response)
+    response, alert = await invoke_model_with_fallback("recaizade", [HumanMessage(content=system_prompt)] + messages, bind_tools_list=role_tools)
+    
+    node_messages = []
+    if alert:
+        node_messages.append(AIMessage(content=alert))
+    node_messages.append(response)
     
     if response.tool_calls:
         tool_outputs = []
@@ -129,7 +160,6 @@ def recaizade_node(state: AgentState):
             )
             
             if needs_confirm:
-                # We stop execution and wait for UI
                 return {
                     "messages": [response], 
                     "waiting_confirmation": True, 
@@ -139,9 +169,9 @@ def recaizade_node(state: AgentState):
             
             tool_outputs.append(ToolMessage(content=result, tool_call_id=tool_call["id"], name=tool_call["name"]))
         
-        return {"messages": [response] + tool_outputs, "sender": "Recaizade", "waiting_confirmation": False}
+        return {"messages": node_messages + tool_outputs, "sender": "Recaizade", "waiting_confirmation": False}
         
-    return {"messages": [response], "sender": "Recaizade", "waiting_confirmation": False}
+    return {"messages": node_messages, "sender": "Recaizade", "waiting_confirmation": False}
 
 def router_node(state: AgentState):
     """Initial node to process input, identify tasks, and route to the correct agent."""
@@ -224,7 +254,7 @@ def format_messages_with_senders(messages):
                 formatted.append(f"[Recaizade]: {content}")
     return "\n\n".join(formatted)
 
-def coder_node(state: AgentState):
+async def coder_node(state: AgentState):
     task = state.get('task_description', '')
     messages = list(state['messages'])
     role_tools = get_tools_for_role("coder")
@@ -236,7 +266,9 @@ def coder_node(state: AgentState):
     if not memory_content.startswith("Error"):
         memory_context = f"\n=== BOT MEMORY ===\n{memory_content}\n"
     
-    system_prompt = f"""{CODER_SYSTEM_PROMPT}
+    system_prompt_base = model_manager.get_system_prompt("coder")
+    
+    system_prompt = f"""{system_prompt_base}
 
 === CURRENT TASK ===
 {task}
@@ -245,7 +277,12 @@ def coder_node(state: AgentState):
 {conversation_context}
 """
     
-    response, alert = invoke_model_with_fallback("coder", [HumanMessage(content=system_prompt)], bind_tools_list=role_tools)
+    response, alert = await invoke_model_with_fallback("coder", [HumanMessage(content=system_prompt)], bind_tools_list=role_tools)
+    
+    node_messages = []
+    if alert:
+        node_messages.append(AIMessage(content=alert))
+    node_messages.append(response)
     
     content = normalize_content(response.content)
     if content and not content.startswith("Coder:"):
@@ -268,11 +305,11 @@ def coder_node(state: AgentState):
             
             tool_outputs.append(ToolMessage(content=result, tool_call_id=tool_call["id"], name=tool_call["name"]))
         
-        return {"messages": [response] + tool_outputs, "sender": "Coder", "waiting_confirmation": False}
+        return {"messages": node_messages + tool_outputs, "sender": "Coder", "waiting_confirmation": False}
         
-    return {"messages": [response], "sender": "Coder", "waiting_confirmation": False}
+    return {"messages": node_messages, "sender": "Coder", "waiting_confirmation": False}
 
-def executor_node(state: AgentState):
+async def executor_node(state: AgentState):
     """Executor takes the Coder's output and implements it by writing files."""
     import re
     
@@ -316,12 +353,21 @@ def executor_node(state: AgentState):
         
         if file_matches:
             filename = file_matches[-1].group(1).strip()
+        else:
+            # Try to find it in the first line of the code block as a comment
+            # e.g., # File: main.py or // File: index.js
+            first_line = code.split('\n')[0].strip()
+            comment_match = re.search(r"(?:File|Filename):\s*[`'\"]?([\w\./_\-]+)[`'\"]?", first_line, re.IGNORECASE)
+            if comment_match:
+                filename = comment_match.group(1).strip()
+            else:
+                filename = None
+
+        if filename:
             result = tool_funcs.write_file(filename, code)
             executed_files.append(f"  - {filename}: {result}")
         else:
-             # Try to find it in the first line of the code block if it was a comment?
-             # Or just report missing filename
-             executed_files.append(f"  - [Skipped]: Found code block but no 'File: filename.py' specified before it.")
+             executed_files.append(f"  - [Skipped]: Found code block but no 'File: filename.py' specified before it or in the first line.")
 
     if executed_files:
         files_summary = "\n".join(executed_files)
@@ -347,20 +393,26 @@ I'll wait for updated instructions."""
     
     return {"messages": [AIMessage(content=response_content)], "sender": "Executor"}
 
-def reviewer_node(state: AgentState):
+async def reviewer_node(state: AgentState):
     messages = list(state['messages'])
     role_tools = get_tools_for_role("reviewer")
     task = state.get('task_description', 'No task description available')
     conversation_context = format_messages_with_senders(messages)
+    system_prompt_base = model_manager.get_system_prompt("reviewer")
     
-    prompt = f"""{REVIEWER_SYSTEM_PROMPT}
+    prompt = f"""{system_prompt_base}
 === ORIGINAL TASK ===
 {task}
 === CONVERSATION HISTORY ===
 {conversation_context}
 """
     
-    response, alert = invoke_model_with_fallback("reviewer", [HumanMessage(content=prompt)], bind_tools_list=role_tools)
+    response, alert = await invoke_model_with_fallback("reviewer", [HumanMessage(content=prompt)], bind_tools_list=role_tools)
+    
+    node_messages = []
+    if alert:
+        node_messages.append(AIMessage(content=alert))
+    node_messages.append(response)
     
     content = normalize_content(response.content)
     if content and not content.startswith("Reviewer:"):
@@ -383,23 +435,24 @@ def reviewer_node(state: AgentState):
             
             tool_outputs.append(ToolMessage(content=result, tool_call_id=tool_call["id"], name=tool_call["name"]))
         
-        node_messages = [response] + tool_outputs
+        node_messages = node_messages + tool_outputs
     else:
-        node_messages = [response]
+        node_messages = node_messages
 
     last_content = normalize_content(node_messages[-1].content)
     status = "APPROVED" if "REVIEW_PASSED" in last_content.upper() else "REJECTED"
     
     return {"messages": node_messages, "sender": "Reviewer", "review_status": status, "waiting_confirmation": False}
 
-def documenter_node(state: AgentState):
+async def documenter_node(state: AgentState):
     messages = list(state['messages'])
     role_tools = get_tools_for_role("documenter")
     task = state.get('task_description', '')
     review_status = state.get('review_status', 'UNKNOWN')
     conversation_context = format_messages_with_senders(messages)
+    system_prompt_base = model_manager.get_system_prompt("documenter")
     
-    prompt = f"""{DOCUMENTER_SYSTEM_PROMPT}
+    prompt = f"""{system_prompt_base}
 === CURRENT TASK ===
 {task}
 === REVIEW STATUS ===
@@ -408,7 +461,12 @@ def documenter_node(state: AgentState):
 {conversation_context}
 """
     
-    response, alert = invoke_model_with_fallback("documenter", [HumanMessage(content=prompt)], bind_tools_list=role_tools)
+    response, alert = await invoke_model_with_fallback("documenter", [HumanMessage(content=prompt)], bind_tools_list=role_tools)
+    
+    node_messages = []
+    if alert:
+        node_messages.append(AIMessage(content=alert))
+    node_messages.append(response)
     
     content = normalize_content(response.content)
     if content and not content.startswith("Documenter:"):
@@ -430,9 +488,9 @@ def documenter_node(state: AgentState):
                 }
             
             tool_outputs.append(ToolMessage(content=result, tool_call_id=tool_call["id"], name=tool_call["name"]))
-        node_messages = [response] + tool_outputs
+        node_messages = node_messages + tool_outputs
     else:
-        node_messages = [response]
+        node_messages = node_messages
 
     final_content = normalize_content(node_messages[-1].content)
     

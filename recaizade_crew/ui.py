@@ -11,7 +11,7 @@ import json
 
 from graph import app_graph
 from config_manager import config
-from agents import model_manager, refresh_prompts
+from agents import model_manager
 
 class ChatMessage(Static):
     def __init__(self, message, sender, **kwargs):
@@ -100,8 +100,12 @@ class SettingsScreen(ModalScreen):
                         yield SettingItem("Auto-Save", "Toggle auto-save behavior", "behavior.auto_save", config.get("behavior", "auto_save"), "switch")
                         yield SettingItem("Allowed Dirs", str(config.get("behavior", "allowed_directories")), "behavior.allowed_directories", ",".join(config.get("behavior", "allowed_directories")))
                         yield SettingItem("Tool Confirmation", config.get("behavior", "tool_confirmation"), "behavior.tool_confirmation", config.get("behavior", "tool_confirmation"), "select", [("Auto", "auto"), ("Dangerous Only", "dangerous"), ("All Tools", "all")])
+                        yield SettingItem("Recursion Limit", "Max steps per task", "behavior.recursion_limit", config.get("behavior", "recursion_limit"))
                         yield SettingItem("Recaizade Tools", "Tools available to leader", "behavior.recaizade_tools", ",".join(config.get("behavior", "recaizade_tools")), "large_text")
-                        yield SettingItem("Crew Tools", "Tools available to crew", "behavior.crew_tools", ",".join(config.get("behavior", "crew_tools")), "large_text")
+                        yield SettingItem("Coder Tools", "Read/Search tools", "behavior.coder_tools", ",".join(config.get("behavior", "coder_tools")), "large_text")
+                        yield SettingItem("Executor Tools", "Write/Execute tools", "behavior.executor_tools", ",".join(config.get("behavior", "executor_tools")), "large_text")
+                        yield SettingItem("Reviewer Tools", "Verification tools", "behavior.reviewer_tools", ",".join(config.get("behavior", "reviewer_tools")), "large_text")
+                        yield SettingItem("Documenter Tools", "Reporting tools", "behavior.documenter_tools", ",".join(config.get("behavior", "documenter_tools")), "large_text")
 
                         # Visuals
                         yield SettingItem("Theme", config.get("visuals", "theme"), "visuals.theme", config.get("visuals", "theme"), "select", [("Tokyo Night", "tokyo-night"), ("Dracula", "dracula"), ("Light", "light")])
@@ -424,7 +428,6 @@ class RecaizadeApp(App):
         if changed:
             # Re-initialize models
             model_manager.reload_models()
-            refresh_prompts()
             
             # Apply UI changes
             self.chat_log.wrap = config.get("visuals", "wrap_text")
@@ -518,7 +521,8 @@ class RecaizadeApp(App):
         }
         
         # Streaming approach to see steps
-        async for event in app_graph.astream(initial_state):
+        limit = config.get("behavior", "recursion_limit") or 25
+        async for event in app_graph.astream(initial_state, config={"recursion_limit": limit}):
             # Check for waiting_confirmation in state
             if "waiting_confirmation" in event and event["waiting_confirmation"]:
                 tool_call = event["pending_tool"]

@@ -2,12 +2,13 @@ from config_manager import config
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_ollama import ChatOllama
 
-def get_recaizade_prompt():
+def get_recaizade_prompt(provider="gemini"):
     stored = config.get("prompts", "recaizade")
     if stored: return stored
     tools = config.get("behavior", "recaizade_tools")
     tools_str = ", ".join([f"'{t}'" for t in tools])
-    return f"""You are Recaizade, a helpful and intelligent AI assistant.
+    
+    prompt = f"""You are Recaizade, a helpful and intelligent AI assistant.
 Your goal is to assist the user. You are the specific interface to a 'Crew' of other AI agents.
 
 You have access to these tools: {tools_str}.
@@ -22,28 +23,44 @@ IMPORTANT: You must follow this cognitive flow for EVERY interaction that might 
 3. ACTION: Make the tool call.
 4. FOLLOW-UP: After the tool executes, provide a conversational response explaining the result (handled by the system loop).
 
-Maintain a friendly and professional persona.
-"""
+Maintain a friendly and professional persona."""
+    return prompt
 
-def get_coder_prompt():
+def get_coder_prompt(provider="gemini"):
     stored = config.get("prompts", "coder")
     if stored: return stored
-    return """You are the Coder for the crew.
+    
+    if provider == "ollama":
+        return """You are the Coder for the crew. Your role is ONLY to write code.
+Do NOT attempt to use tools. You do not have access to file management tools.
+Your ONLY output should be:
+1. <thinking>...</thinking> tags for your plan.
+2. A brief description of what you will do.
+3. The source code in markdown code blocks.
+
+CRITICAL: Before EVERY code block, you MUST specify the filename like this:
+File: path/to/filename.ext
+```language
+... code ...
+```
+"""
+    
+    return """You are the Coder for the crew. 
 Your task is to write clean, efficient, and well-documented code based on the human request and Recaizade's coordination.
 
 IMPORTANT: You must follow this cognitive flow:
 1. THINKING: Analyze the task and plan your code architecture within <thinking>...</thinking> tags.
-2. ANNOUNCEMENT: If you decide to use a tool, explicitly state: "I will now make a tool call to [tool_name] to [purpose]."
+2. ANNOUNCEMENT: If you decide to use a tool (like 'read_file'), explicitly state: "I will now make a tool call to [tool_name] to [purpose]."
 3. ACTION: Make the tool call or provide the code block.
 4. FOLLOW-UP: After the action, provide a brief summary of what you implemented.
 
 When providing code, use markdown blocks with filenames clearly indicated before the block (e.g., 'File: main.py').
 """
 
-def get_executor_prompt():
+def get_executor_prompt(provider="gemini"):
     stored = config.get("prompts", "executor")
     if stored: return stored
-    tools = config.get("behavior", "crew_tools")
+    tools = config.get("behavior", "executor_tools")
     tools_str = ", ".join([f"'{t}'" for t in tools])
     return f"""You are the Executor. You don't write code; you take code provided by the Coder and ensure it is saved correctly using file tools.
 You have access to these tools: {tools_str}.
@@ -52,12 +69,22 @@ IMPORTANT: You must follow this cognitive flow:
 1. THINKING: Analyze the Coder's output and identify which files need to be written/modified within <thinking>...</thinking> tags.
 2. ANNOUNCEMENT: Explicitly state: "I will now make a tool call to 'write_file' to save [filename]."
 3. ACTION: Execute the tool calls.
-4. FOLLOW-UP: Confirm that the files have been processed.
-"""
+4. FOLLOW-UP: Confirm that the files have been processed."""
 
-def get_reviewer_prompt():
+def get_reviewer_prompt(provider="gemini"):
     stored = config.get("prompts", "reviewer")
     if stored: return stored
+    
+    if provider == "ollama":
+        return """You are the Reviewer. Your role is to examine the code written by the Coder and confirmed by the Executor.
+Check for bugs, security issues, performance bottlenecks, and adherence to requirements.
+
+Your output must include:
+1. <thinking>...</thinking> tags for your analysis.
+2. Structured feedback.
+3. If everything is correct, you MUST include 'REVIEW_PASSED' in your response.
+4. If there are issues, include 'REVIEW_FAILED' and list the required changes."""
+
     return """You are the Reviewer. Your role is to examine the code written and saved by the Coder and Executor.
 Check for bugs, security issues, performance bottlenecks, and adherence to requirements.
 
@@ -67,10 +94,9 @@ IMPORTANT: You must follow this cognitive flow:
 3. ACTION: Read the file or provide your feedback.
 4. FOLLOW-UP: Provide a structured review. 
 
-If everything is correct, Respond with 'REVIEW_PASSED'. If there are issues, suggest changes and respond with 'REVIEW_FAILED'.
-"""
+If everything is correct, Respond with 'REVIEW_PASSED'. If there are issues, suggest changes and respond with 'REVIEW_FAILED'."""
 
-def get_documenter_prompt():
+def get_documenter_prompt(provider="gemini"):
     stored = config.get("prompts", "documenter")
     if stored: return stored
     return """You are the Documenter. Your job is to create reports and maintain project memory.
@@ -83,8 +109,7 @@ IMPORTANT: You must follow this cognitive flow:
 
 You have two main responsibilities:
 1. User Reporting: Write a clear progress report for the user. Summarize what was done and current status.
-2. Bot Memory: Write a detailed technical log for the crew to read in future steps. Include technical decisions, file paths, etc.
-"""
+2. Bot Memory: Write a detailed technical log for the crew to read in future steps. Include technical decisions, file paths, etc."""
 
 class ModelManager:
     def __init__(self):
@@ -152,20 +177,16 @@ class ModelManager:
         self.provider = "ollama"
         self._initialize_ollama()
 
+    def get_system_prompt(self, role="recaizade"):
+        """Get the appropriate system prompt based on role and current provider."""
+        RECALLED_PROMPTS = {
+            "recaizade": get_recaizade_prompt(self.provider),
+            "coder": get_coder_prompt(self.provider),
+            "executor": get_executor_prompt(self.provider),
+            "reviewer": get_reviewer_prompt(self.provider),
+            "documenter": get_documenter_prompt(self.provider)
+        }
+        return RECALLED_PROMPTS.get(role, "")
+
 # Initialize Manager
 model_manager = ModelManager()
-
-# Update system prompt variables to be dynamic
-RECAIZADE_SYSTEM_PROMPT = get_recaizade_prompt()
-CODER_SYSTEM_PROMPT = get_coder_prompt()
-EXECUTOR_SYSTEM_PROMPT = get_executor_prompt()
-REVIEWER_SYSTEM_PROMPT = get_reviewer_prompt()
-DOCUMENTER_SYSTEM_PROMPT = get_documenter_prompt()
-
-def refresh_prompts():
-    global RECAIZADE_SYSTEM_PROMPT, CODER_SYSTEM_PROMPT, EXECUTOR_SYSTEM_PROMPT, REVIEWER_SYSTEM_PROMPT, DOCUMENTER_SYSTEM_PROMPT
-    RECAIZADE_SYSTEM_PROMPT = get_recaizade_prompt()
-    CODER_SYSTEM_PROMPT = get_coder_prompt()
-    EXECUTOR_SYSTEM_PROMPT = get_executor_prompt()
-    REVIEWER_SYSTEM_PROMPT = get_reviewer_prompt()
-    DOCUMENTER_SYSTEM_PROMPT = get_documenter_prompt()
