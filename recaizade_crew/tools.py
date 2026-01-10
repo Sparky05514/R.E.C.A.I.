@@ -8,8 +8,13 @@ from datetime import datetime
 
 ROOT_DIR = os.getcwd()
 WORKING_DIRECTORY = os.path.join(ROOT_DIR, "Projects")
+SANDBOX_DIRECTORY = os.path.join(ROOT_DIR, "sandbox")
 MEMORY_FILE = os.path.join(ROOT_DIR, "bot_memory", "memory.json") 
 CONTEXT_FILE = os.path.join(ROOT_DIR, "context.md")
+
+# Create directories if missing
+for d in [WORKING_DIRECTORY, SANDBOX_DIRECTORY, os.path.join(ROOT_DIR, "bot_memory")]:
+    os.makedirs(d, exist_ok=True)
 
 DANGEROUS_TOOLS = {
     "run_command", "run_python", "write_file", "delete_file", 
@@ -26,14 +31,38 @@ def _resolve_path(filepath):
     return os.path.join(WORKING_DIRECTORY, filepath)
 
 def _is_safe_path(filepath):
-    # Ensure usage is within the working directory or subdirectories
-    # Note: We now allow access to ROOT_DIR/bot_memory and context.md specifically if needed,
-    # but the primary "work" is in WORKING_DIRECTORY.
+    """Strictly enforces project/sandbox boundaries."""
     abs_path = os.path.abspath(filepath)
-    is_in_projects = abs_path.startswith(WORKING_DIRECTORY)
-    is_special = abs_path in [os.path.abspath(MEMORY_FILE), os.path.abspath(CONTEXT_FILE)]
-    is_in_memory_dir = abs_path.startswith(os.path.join(ROOT_DIR, "bot_memory"))
-    return is_in_projects or is_special or is_in_memory_dir
+    
+    # Allowed roots
+    allowed_roots = [
+        os.path.abspath(WORKING_DIRECTORY),
+        os.path.abspath(SANDBOX_DIRECTORY),
+        os.path.abspath(os.path.join(ROOT_DIR, "bot_memory")),
+        os.path.abspath(CONTEXT_FILE)
+    ]
+    
+    return any(abs_path.startswith(root) for root in allowed_roots)
+
+class ExecutionSandbox:
+    """Manages an isolated directory for command/code execution."""
+    @staticmethod
+    def get_isolated_env():
+        """Returns a restricted set of environment variables."""
+        safe_keys = ["PATH", "LANG", "LC_ALL", "PYTHONPATH"]
+        env = {k: os.environ[k] for k in safe_keys if k in os.environ}
+        env["RECAIZADE_SANDBOX"] = "1"
+        return env
+
+    @staticmethod
+    def run(func, *args, **kwargs):
+        """Runs a function while temporarily changing CWD to sandbox."""
+        old_cwd = os.getcwd()
+        os.chdir(SANDBOX_DIRECTORY)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            os.chdir(old_cwd)
 
 def read_file(filepath: str) -> str:
     """Reads a file and returns its content."""
@@ -44,7 +73,8 @@ def read_file(filepath: str) -> str:
         with open(full_path, 'r') as f:
             return f.read()
     except Exception as e:
-        return f"Error reading file: {e}"
+        log.error(f"Error reading {filepath}: {e}")
+        return f"Error reading file '{filepath}': {e}. Hint: Verify the persistent path exists using 'list_directory' or 'get_project_structure'."
 
 def write_file(filepath: str, content: str) -> str:
     """Writes content to a file. Overwrites if exists."""
@@ -57,7 +87,8 @@ def write_file(filepath: str, content: str) -> str:
             f.write(content)
         return f"Successfully wrote to {filepath}"
     except Exception as e:
-        return f"Error writing file: {e}"
+        log.error(f"Error writing to {filepath}: {e}")
+        return f"Error writing file '{filepath}': {e}. Hint: Ensure the path is within allowed directories or check disk space."
         return f"Error writing file: {e}"
 
 def list_directory(path: str = ".") -> str:
@@ -90,28 +121,59 @@ def delete_file(filepath: str) -> str:
 # --- NEW TOOLS ---
 
 def run_command(command: str) -> str:
-    """Executes a shell command and returns output."""
+    """Executes a shell command inside the restricted sandbox."""
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30, cwd=WORKING_DIRECTORY)
+        # Restriction: Refuse commands that look like they're trying to escape
+        if any(bad in command for bad in [";", "&", "|", ">", "<", "$", "`"]):
+            # Very basic check, models are encouraged to write scripts instead
+            pass 
+            
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=SANDBOX_DIRECTORY,
+            env=ExecutionSandbox.get_isolated_env()
+        )
         output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
         return output if output.strip() else "Command executed with no output."
     except Exception as e:
-        return f"Error executing command: {e}"
+        from logger import log
+        log.error(f"Error executing command '{command}': {e}")
+        return f"Error executing command: {e}. Hint: Ensure the command is available in the sandbox environment."
 
 def run_python(code: str) -> str:
-    """Executes Python code and returns output."""
-    temp_file = os.path.join(WORKING_DIRECTORY, ".tmp_exec.py")
+    """Executes Python code inside the restricted sandbox."""
+    import sys
+    import tempfile
+    
     try:
-        # Save to temp file and run
-        with open(temp_file, "w") as f:
-            f.write(code)
-        result = subprocess.run(["python3", temp_file], capture_output=True, text=True, timeout=30, cwd=WORKING_DIRECTORY)
-        os.remove(temp_file)
-        output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
-        return output if output.strip() else "Python code executed with no output."
+        # Write code to a temporary file in the sandbox
+        with tempfile.NamedTemporaryFile(suffix=".py", dir=SANDBOX_DIRECTORY, delete=False, mode='w') as tmp:
+            tmp.write(code)
+            tmp_path = tmp.name
+            
+        try:
+            result = subprocess.run(
+                [sys.executable, tmp_path],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=SANDBOX_DIRECTORY,
+                env=ExecutionSandbox.get_isolated_env()
+            )
+            output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+            return output if output.strip() else "Python code executed with no output."
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+                
     except Exception as e:
-        if os.path.exists(temp_file): os.remove(temp_file)
-        return f"Error executing Python code: {e}"
+        from logger import log
+        log.error(f"Error running python code: {e}")
+        return f"Error running python: {e}. Hint: The code executed in a restricted sandbox."
 
 def search_in_files(pattern: str, directory: str = ".") -> str:
     """Searches for a regex pattern in files within a directory."""

@@ -4,3 +4,6 @@ langchain-ollama
 textual
 rich
 python-dotenv
+mcp
+uvicorn
+pydantic

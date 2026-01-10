@@ -9,9 +9,10 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 import re
 import json
 
-from graph import app_graph
+from graph import app_graph, MCPClientManager
 from config_manager import config
 from agents import model_manager
+from logger import log
 
 class ChatMessage(Static):
     def __init__(self, message, sender, **kwargs):
@@ -409,6 +410,11 @@ class RecaizadeApp(App):
         ("ctrl+l", "clear_chat", "Clear Chat"),
         ("ctrl+q", "quit", "Quit")
     ]
+
+    async def action_quit(self) -> None:
+        """Override quit to perform cleanup."""
+        await MCPClientManager.cleanup()
+        self.exit()
 
     def compose(self) -> ComposeResult:
         with Container(id="chat-container"):

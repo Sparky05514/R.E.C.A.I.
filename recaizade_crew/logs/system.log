@@ -1,0 +1,67 @@
+2026-01-10 23:11:58,518 - recaizade_crew - INFO - Starting stress test session.
+2026-01-10 23:12:19,839 - recaizade_crew - INFO - Starting stress test session.
+2026-01-10 23:12:53,179 - recaizade_crew - INFO - Starting stress test session.
+2026-01-10 23:13:06,217 - recaizade_crew - INFO - Starting stress test session.
+2026-01-10 23:13:06,217 - recaizade_crew - INFO - Starting persistent MCP server...
+2026-01-10 23:13:06,241 - recaizade_crew - ERROR - Failed to start MCP session: Connection closed
+2026-01-10 23:13:06,241 - recaizade_crew - ERROR - MCP Session unavailable.
+2026-01-10 23:13:06,241 - recaizade_crew - INFO - Starting persistent MCP server...
+2026-01-10 23:13:16,795 - recaizade_crew - INFO - Starting stress test session.
+2026-01-10 23:13:16,795 - recaizade_crew - INFO - Starting persistent MCP server...
+2026-01-10 23:13:17,079 - recaizade_crew - INFO - MCP Session initialized.
+2026-01-10 23:13:17,079 - recaizade_crew - INFO - Executing tool list_directory via persistent MCP (Attempt 1)...
+2026-01-10 23:13:17,085 - recaizade_crew - INFO - Executing tool list_directory via persistent MCP (Attempt 1)...
+2026-01-10 23:13:17,088 - recaizade_crew - INFO - Executing tool list_directory via persistent MCP (Attempt 1)...
+2026-01-10 23:13:17,090 - recaizade_crew - INFO - Closing MCP session...
+2026-01-10 23:13:17,140 - recaizade_crew - INFO - MCP session closed.
+2026-01-10 23:24:43,554 - recaizade_crew - ERROR - Schema validation FAILED for read_file: 1 validation error for ReadFileArgs
+filepath
+  Field required [type=missing, input_value={}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+2026-01-10 23:24:43,554 - recaizade_crew - INFO - Schema validation passed for run_python
+2026-01-10 23:24:43,554 - recaizade_crew - INFO - Schema validation passed for read_file
+2026-01-10 23:24:56,846 - recaizade_crew - ERROR - Schema validation FAILED for read_file: 1 validation error for ReadFileArgs
+filepath
+  Field required [type=missing, input_value={}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+2026-01-10 23:24:56,846 - recaizade_crew - INFO - Schema validation passed for run_python
+2026-01-10 23:24:56,846 - recaizade_crew - INFO - Schema validation passed for read_file
+2026-01-10 23:24:56,846 - recaizade_crew - INFO - Starting persistent MCP server...
+2026-01-10 23:24:57,123 - recaizade_crew - INFO - MCP Session initialized.
+2026-01-10 23:24:57,123 - recaizade_crew - INFO - Executing tool read_file via persistent MCP (Attempt 1)...
+2026-01-10 23:25:13,217 - recaizade_crew - ERROR - Schema validation FAILED for read_file: 1 validation error for ReadFileArgs
+filepath
+  Field required [type=missing, input_value={}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+2026-01-10 23:25:13,217 - recaizade_crew - INFO - Schema validation passed for run_python
+2026-01-10 23:25:13,217 - recaizade_crew - INFO - Schema validation passed for read_file
+2026-01-10 23:25:13,217 - recaizade_crew - INFO - Starting persistent MCP server...
+2026-01-10 23:25:13,506 - recaizade_crew - INFO - MCP Session initialized.
+2026-01-10 23:25:13,506 - recaizade_crew - INFO - Executing tool read_file via persistent MCP (Attempt 1)...
+2026-01-10 23:25:23,200 - recaizade_crew - ERROR - Schema validation FAILED for read_file: 1 validation error for ReadFileArgs
+filepath
+  Field required [type=missing, input_value={}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+2026-01-10 23:25:23,200 - recaizade_crew - INFO - Schema validation passed for run_python
+2026-01-10 23:25:23,200 - recaizade_crew - INFO - Schema validation passed for read_file
+2026-01-10 23:25:23,200 - recaizade_crew - INFO - Starting persistent MCP server...
+2026-01-10 23:25:23,480 - recaizade_crew - INFO - MCP Session initialized.
+2026-01-10 23:25:23,480 - recaizade_crew - INFO - Executing tool read_file via persistent MCP (Attempt 1)...
+2026-01-10 23:25:45,522 - recaizade_crew - ERROR - Schema validation FAILED for read_file: 1 validation error for ReadFileArgs
+filepath
+  Field required [type=missing, input_value={}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+2026-01-10 23:25:45,522 - recaizade_crew - INFO - Schema validation passed for run_python
+2026-01-10 23:25:45,522 - recaizade_crew - INFO - Schema validation passed for read_file
+2026-01-10 23:25:45,522 - recaizade_crew - INFO - Starting persistent MCP server...
+2026-01-10 23:25:45,839 - recaizade_crew - INFO - MCP Session initialized.
+2026-01-10 23:25:45,839 - recaizade_crew - INFO - Executing tool read_file via persistent MCP (Attempt 1)...
+2026-01-10 23:26:00,352 - recaizade_crew - ERROR - Schema validation FAILED for read_file: 1 validation error for ReadFileArgs
+filepath
+  Field required [type=missing, input_value={}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+2026-01-10 23:26:00,352 - recaizade_crew - INFO - Schema validation passed for run_python
+2026-01-10 23:26:00,352 - recaizade_crew - INFO - Schema validation passed for read_file
+2026-01-10 23:26:00,352 - recaizade_crew - INFO - Starting persistent MCP server...
+2026-01-10 23:26:00,623 - recaizade_crew - INFO - MCP Session initialized.
+2026-01-10 23:26:00,623 - recaizade_crew - INFO - Executing tool read_file via persistent MCP (Attempt 1)...
