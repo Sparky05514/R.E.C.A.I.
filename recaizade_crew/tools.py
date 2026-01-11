@@ -5,16 +5,24 @@ import json
 import re
 from pathlib import Path
 from datetime import datetime
+from config_manager import config
 
 ROOT_DIR = os.getcwd()
 WORKING_DIRECTORY = os.path.join(ROOT_DIR, "Projects")
-SANDBOX_DIRECTORY = os.path.join(ROOT_DIR, "sandbox")
+
+def _get_sandbox_dir():
+    sandbox_name = config.get("behavior", "sandbox_directory") or "sandbox"
+    path = os.path.join(ROOT_DIR, sandbox_name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
 MEMORY_FILE = os.path.join(ROOT_DIR, "bot_memory", "memory.json") 
 CONTEXT_FILE = os.path.join(ROOT_DIR, "context.md")
 
 # Create directories if missing
-for d in [WORKING_DIRECTORY, SANDBOX_DIRECTORY, os.path.join(ROOT_DIR, "bot_memory")]:
+for d in [WORKING_DIRECTORY, os.path.join(ROOT_DIR, "bot_memory")]:
     os.makedirs(d, exist_ok=True)
+_get_sandbox_dir() # Ensure sandbox exists
 
 DANGEROUS_TOOLS = {
     "run_command", "run_python", "write_file", "delete_file", 
@@ -37,7 +45,7 @@ def _is_safe_path(filepath):
     # Allowed roots
     allowed_roots = [
         os.path.abspath(WORKING_DIRECTORY),
-        os.path.abspath(SANDBOX_DIRECTORY),
+        os.path.abspath(_get_sandbox_dir()),
         os.path.abspath(os.path.join(ROOT_DIR, "bot_memory")),
         os.path.abspath(CONTEXT_FILE)
     ]
@@ -58,7 +66,7 @@ class ExecutionSandbox:
     def run(func, *args, **kwargs):
         """Runs a function while temporarily changing CWD to sandbox."""
         old_cwd = os.getcwd()
-        os.chdir(SANDBOX_DIRECTORY)
+        os.chdir(_get_sandbox_dir())
         try:
             return func(*args, **kwargs)
         finally:
@@ -121,11 +129,14 @@ def delete_file(filepath: str) -> str:
 # --- NEW TOOLS ---
 
 def run_command(command: str) -> str:
-    """Executes a shell command inside the restricted sandbox."""
+    """Executes a shell command."""
+    use_sandbox = config.get("behavior", "use_sandbox")
+    cwd = _get_sandbox_dir() if use_sandbox else WORKING_DIRECTORY
+    env = ExecutionSandbox.get_isolated_env() if use_sandbox else os.environ.copy()
+    
     try:
         # Restriction: Refuse commands that look like they're trying to escape
-        if any(bad in command for bad in [";", "&", "|", ">", "<", "$", "`"]):
-            # Very basic check, models are encouraged to write scripts instead
+        if use_sandbox and any(bad in command for bad in [";", "&", "|", ">", "<", "$", "`"]):
             pass 
             
         result = subprocess.run(
@@ -134,24 +145,29 @@ def run_command(command: str) -> str:
             capture_output=True,
             text=True,
             timeout=30,
-            cwd=SANDBOX_DIRECTORY,
-            env=ExecutionSandbox.get_isolated_env()
+            cwd=cwd,
+            env=env
         )
         output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
         return output if output.strip() else "Command executed with no output."
     except Exception as e:
         from logger import log
         log.error(f"Error executing command '{command}': {e}")
-        return f"Error executing command: {e}. Hint: Ensure the command is available in the sandbox environment."
+        hint = "sandbox" if use_sandbox else "environment"
+        return f"Error executing command: {e}. Hint: Ensure the command is available in the {hint}."
 
 def run_python(code: str) -> str:
-    """Executes Python code inside the restricted sandbox."""
+    """Executes Python code."""
     import sys
     import tempfile
     
+    use_sandbox = config.get("behavior", "use_sandbox")
+    cwd = _get_sandbox_dir() if use_sandbox else WORKING_DIRECTORY
+    env = ExecutionSandbox.get_isolated_env() if use_sandbox else os.environ.copy()
+    
     try:
-        # Write code to a temporary file in the sandbox
-        with tempfile.NamedTemporaryFile(suffix=".py", dir=SANDBOX_DIRECTORY, delete=False, mode='w') as tmp:
+        # Write code to a temporary file
+        with tempfile.NamedTemporaryFile(suffix=".py", dir=cwd, delete=False, mode='w') as tmp:
             tmp.write(code)
             tmp_path = tmp.name
             
@@ -161,8 +177,8 @@ def run_python(code: str) -> str:
                 capture_output=True,
                 text=True,
                 timeout=30,
-                cwd=SANDBOX_DIRECTORY,
-                env=ExecutionSandbox.get_isolated_env()
+                cwd=cwd,
+                env=env
             )
             output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
             return output if output.strip() else "Python code executed with no output."
@@ -173,7 +189,8 @@ def run_python(code: str) -> str:
     except Exception as e:
         from logger import log
         log.error(f"Error running python code: {e}")
-        return f"Error running python: {e}. Hint: The code executed in a restricted sandbox."
+        hint = "restricted sandbox" if use_sandbox else "local environment"
+        return f"Error running python: {e}. Hint: The code executed in a {hint}."
 
 def search_in_files(pattern: str, directory: str = ".") -> str:
     """Searches for a regex pattern in files within a directory."""

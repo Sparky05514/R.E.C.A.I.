@@ -23,6 +23,9 @@ DEFAULT_SETTINGS = {
         "auto_save": True,
         "allowed_directories": ["."],
         "tool_confirmation": "dangerous",  # auto, dangerous, all
+        "use_mcp": False,
+        "use_sandbox": True,
+        "sandbox_directory": "sandbox",
         "recursion_limit": 50,
         "recaizade_tools": [
             "read_file", "write_file", "list_directory", "delete_file", "run_command", "run_python", 
